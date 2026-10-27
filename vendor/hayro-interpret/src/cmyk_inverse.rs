@@ -2,12 +2,12 @@
 //! CMYK profile pages are drawn with, for an additive colour painted into a `DeviceCMYK`
 //! blending space (ISO 32000-2 §11.3.4).
 //!
-//! The ink is the profile's inverse: a colour inside the profile's gamut draws as itself, one
-//! outside it as the nearest colour the profile reaches. Black is `K = 0.4 · k₀² + 0.6 · k₀⁸`
-//! with `k₀ = 1 − max(r, g, b)`, light in the mid tones and full for black, and cyan, magenta
-//! and yellow are then solved for by Newton's method at that black. This follows what Acrobat
-//! draws for RGB colours, blended and not, in a CMYK page group; §10.4.2.4's black generation
-//! and undercolour removal is for a device without a profile.
+//! Black is `K = 0.4 · k₀² + 0.6 · k₀⁸` with `k₀ = 1 − max(r, g, b)`, light in the mid tones
+//! and full for black; cyan, magenta and yellow are then solved for by Newton's method at that
+//! black, clamped to the ink range. A colour inside the profile's gamut draws as itself; one
+//! outside it lands where the clamped solve stops. The curve matches Acrobat's output for the
+//! greys, black and red measured in a CMYK page group, plain and under a blend mode;
+//! §10.4.2.4's black generation and undercolour removal is for a device without a profile.
 
 use moxcms::{ColorProfile, Layout, TransformF32Executor, TransformOptions};
 use std::cell::Cell;
@@ -36,9 +36,10 @@ static FORWARD: LazyLock<Option<Arc<TransformF32Executor>>> = LazyLock::new(|| {
         .ok()
 });
 
-/// The process ink `[C, M, Y, K]` (0 = no ink) that the CMYK profile draws as `rgb`, or as
-/// close to it as the profile reaches for a colour outside its gamut. `None` when the
+/// The process ink `[C, M, Y, K]` (0 = no ink) that the CMYK profile draws as `rgb`; for a
+/// colour outside its gamut, where the clamped solve stops. `None` when the
 /// profile can't be evaluated or `rgb` isn't finite.
+///
 /// The last colour converted on this thread is kept, as a run of fills (the glyphs of a
 /// line of text) usually shares one colour.
 pub(crate) fn srgb_to_cmyk(rgb: [f32; 3]) -> Option<[f32; 4]> {
