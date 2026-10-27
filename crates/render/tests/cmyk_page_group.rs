@@ -113,20 +113,31 @@ fn pages_that_dont_blend_in_cmyk_are_drawn_as_before() {
 }
 
 /// An RGB colour on a CMYK page is the ink that draws back to it through the CMYK profile
-/// (hayro-interpret patch (69)). Painted without a blend, orange draws as itself. Under
-/// `/BM /Difference` with black ink, a colour's cyan, magenta and yellow are complemented and
-/// its black kept, so 50% grey, mostly cyan, magenta and yellow ink, comes out a warm grey (Acrobat
-/// draws about 137 112 106), neither the neutral grey of RGB blending nor near-black.
+/// (hayro-interpret patch (69)), compared with what Acrobat draws for the same page.
+///
+/// Painted without a blend, a colour inside the profile's gamut draws as itself, black stays
+/// black and pure red is clipped to the profile's red. Under `/BM /Difference` with black ink,
+/// a colour's cyan, magenta and yellow are complemented and its black kept, so 50% grey, mostly
+/// cyan, magenta and yellow ink, comes out a warm grey: neither the neutral grey of RGB blending
+/// nor the near-black of grey made from black ink alone.
 #[test]
 fn an_rgb_colour_on_a_cmyk_page_is_the_ink_that_draws_as_it() {
     let grey = "q 0.5 0.5 0.5 rg 110 10 80 80 re f /D gs 0 0 0 1 k 110 10 80 80 re f Q";
-    for (rgb, expected) in
-        [("0.8 0.4 0.2", [204, 102, 51]), ("0.3 0.7 0.4", [77, 179, 102]), ("0.9 0.9 0.85", [230, 230, 217]), ("1 1 1", [255, 255, 255])]
-    {
-        let page = render(Some("/DeviceCMYK"), &format!("{rgb} rg 10 10 80 80 re f {grey}"));
-        let (drawn, blended) = (at(&page, 50, 50), at(&page, 150, 50));
-        assert!(close(drawn, expected), "{rgb} drew as {drawn:?}");
-        let [r, g, b] = blended;
-        assert!(r > 100 && r > g && g > b && r - b > 15, "grey under Difference with black: {blended:?}");
+    // (colour, expected pixel, how far from it): the colour itself inside the gamut; Acrobat's
+    // pixel for 10% grey, black and red.
+    let cases = [
+        ("0.8 0.4 0.2", [204, 102, 51], 3),
+        ("0.3 0.7 0.4", [77, 179, 102], 3),
+        ("0.9 0.9 0.85", [230, 230, 217], 3),
+        ("0.1 0.1 0.1", [27, 27, 27], 5),
+        ("0 0 0", [5, 6, 7], 8),
+        ("1 0 0", [238, 32, 37], 8),
+    ];
+    for (rgb, expected, within) in cases {
+        let drawn = at(&render(Some("/DeviceCMYK"), &format!("{rgb} rg 10 10 80 80 re f {grey}")), 50, 50);
+        assert!(drawn.iter().zip(expected).all(|(a, b)| a.abs_diff(b) <= within), "{rgb} drew as {drawn:?}, expected {expected:?}");
     }
+    let blended = at(&render(Some("/DeviceCMYK"), grey), 150, 50);
+    let acrobat = [137, 112, 106];
+    assert!(blended.iter().zip(acrobat).all(|(a, b)| a.abs_diff(b) <= 10), "grey under Difference with black: {blended:?}, Acrobat {acrobat:?}");
 }

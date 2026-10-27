@@ -2,11 +2,12 @@
 //! CMYK profile pages are drawn with, for an additive colour painted into a `DeviceCMYK`
 //! blending space (ISO 32000-2 §11.3.4).
 //!
-//! The ink is the profile's inverse, so a colour painted without a blend draws as itself.
-//! Black is generated lightly, `K = 0.4 · k₀²` with `k₀ = 1 − max(r, g, b)`, and cyan,
-//! magenta and yellow are then solved for by Newton's method at that black. This follows
-//! what Acrobat draws for an RGB colour under a blend in a CMYK page group; §10.4.2.4's
-//! black generation and undercolour removal is for a device without a profile.
+//! The ink is the profile's inverse: a colour inside the profile's gamut draws as itself, one
+//! outside it as the nearest colour the profile reaches. Black is `K = 0.4 · k₀² + 0.6 · k₀⁸`
+//! with `k₀ = 1 − max(r, g, b)`, light in the mid tones and full for black, and cyan, magenta
+//! and yellow are then solved for by Newton's method at that black. This follows what Acrobat
+//! draws for RGB colours, blended and not, in a CMYK page group; §10.4.2.4's black generation
+//! and undercolour removal is for a device without a profile.
 
 use moxcms::{ColorProfile, Layout, TransformF32Executor, TransformOptions};
 use std::cell::Cell;
@@ -14,7 +15,7 @@ use std::sync::{Arc, LazyLock};
 
 use crate::color::CMYK_PROFILE;
 
-/// The share of `k₀²` taken as black ink.
+/// The weight of `k₀²` in the black ink; the rest is on `k₀⁸`.
 const BLACK_GENERATION: f32 = 0.4;
 /// Newton steps; each costs four profile evaluations.
 const MAX_STEPS: usize = 12;
@@ -63,7 +64,7 @@ thread_local! {
 fn solve_ink(rgb: [f32; 3]) -> Option<[f32; 4]> {
     let forward: &TransformF32Executor = FORWARD.as_ref()?.as_ref();
     let k0 = 1.0 - rgb[0].max(rgb[1]).max(rgb[2]);
-    let k = BLACK_GENERATION * k0 * k0;
+    let k = BLACK_GENERATION * k0 * k0 + (1.0 - BLACK_GENERATION) * k0.powi(8);
     let eval = |cmy: [f32; 3]| draw(forward, [cmy[0], cmy[1], cmy[2], k]);
 
     let mut cmy = rgb.map(|v| 1.0 - v);
