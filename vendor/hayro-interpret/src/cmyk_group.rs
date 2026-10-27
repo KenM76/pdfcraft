@@ -12,23 +12,29 @@
 //! that can blend in CMYK takes such a group through [`Device::draw_isolated_cmyk_group`] and
 //! interprets it with [`CmykGroup::interpret`] as often as it needs; every other device, and a
 //! device that declines, gets the group's contents as before.
+//!
+//! PdfCraft patch (68): a page whose group blends in `DeviceCMYK` takes the same path. The page
+//! group is always isolated (§11.4.7), so its contents are such a group too, composited onto
+//! the paper after they are converted out of CMYK.
 
 use crate::InterpreterSettings;
 use crate::context::{Context, InterpreterCache};
 use crate::device::Device;
+use crate::interpret::interpret_page_contents;
 use crate::interpret::state::{ClipType, State};
 use crate::x_object::{FormXObject, interpret_form_contents};
-use hayro_syntax::object::dict::keys::{CS, GROUP};
-use hayro_syntax::object::{Dict, Name};
-use hayro_syntax::page::Resources;
+use hayro_syntax::object::dict::keys::{BM, CS, EXT_G_STATE, GROUP, PATTERN, RESOURCES, XOBJECT};
+use hayro_syntax::object::{Array, Dict, Name, Stream};
+use hayro_syntax::page::{Page, Resources};
 use hayro_syntax::xref::XRef;
 use kurbo::{Affine, Rect, Shape};
+use std::cell::Cell;
 use std::ops::Deref;
 
 /// An isolated, non-knockout transparency group whose blending colour space is `DeviceCMYK`,
 /// captured where it is painted (PdfCraft patch (70); see the module documentation).
 pub struct CmykGroup<'a, 'b> {
-    form: &'b FormXObject<'a>,
+    contents: Contents<'a, 'b>,
     resources: &'b Resources<'a>,
     /// The graphics state the group's contents start with: the state at `Do`, after the
     /// form's `/Matrix`, with the group's own opacity, soft mask and blend mode already taken
@@ -40,16 +46,33 @@ pub struct CmykGroup<'a, 'b> {
     settings: InterpreterSettings,
     xref: &'a XRef,
     nesting_depth: u32,
+    /// Whether a page's contents were charged to its content budget yet (patch (68)).
+    charged: Cell<bool>,
+}
+
+/// What a [`CmykGroup`] draws: a form's contents, or a page's (patch (68)).
+enum Contents<'a, 'b> {
+    Form(&'b FormXObject<'a>),
+    Page(&'b Page<'a>),
 }
 
 impl<'a, 'b> CmykGroup<'a, 'b> {
     pub(crate) fn new(form: &'b FormXObject<'a>, resources: &'b Resources<'a>, context: &Context<'a>) -> Self {
+        Self::with(Contents::Form(form), resources, context)
+    }
+
+    /// PdfCraft patch (68): the contents of `page`, whose group blends in `DeviceCMYK`.
+    pub(crate) fn page(page: &'b Page<'a>, context: &Context<'a>) -> Self {
+        Self::with(Contents::Page(page), page.resources(), context)
+    }
+
+    fn with(contents: Contents<'a, 'b>, resources: &'b Resources<'a>, context: &Context<'a>) -> Self {
         let mut state = context.get().clone();
         // The clips in force belong to the device the group is composited onto; contents
         // interpreted on their own push and pop only the clips they set themselves.
         state.clips = Vec::<ClipType>::new();
         Self {
-            form,
+            contents,
             resources,
             state,
             root_transform: context.root_transform(),
@@ -58,16 +81,25 @@ impl<'a, 'b> CmykGroup<'a, 'b> {
             settings: context.settings.clone(),
             xref: context.xref,
             nesting_depth: context.nesting_depth(),
+            charged: Cell::new(false),
         }
     }
 
     /// The device-space box the group can paint: its `/BBox` under the current transform,
-    /// within the area being drawn.
+    /// within the area being drawn (for a page, that area).
     pub fn device_bbox(&self) -> Rect {
-        let [x0, y0, x1, y1] = self.form.bbox;
+        let Contents::Form(form) = self.contents else {
+            return self.bbox;
+        };
+        let [x0, y0, x1, y1] = form.bbox;
         let user = Rect::new(x0 as f64, y0 as f64, x1 as f64, y1 as f64);
         let device = (self.state.ctm * user.to_path(0.1)).bounding_box();
         device.intersect(self.bbox)
+    }
+
+    /// Whether a page's contents were charged to its content budget by [`Self::interpret`].
+    pub(crate) fn charged(&self) -> bool {
+        self.charged.get()
     }
 
     /// Interpret the group's contents into `device`, with device space moved by `offset`
@@ -85,7 +117,13 @@ impl<'a, 'b> CmykGroup<'a, 'b> {
             state,
             self.nesting_depth,
         );
-        interpret_form_contents(self.resources, self.form, &mut context, device);
+        match self.contents {
+            Contents::Form(form) => interpret_form_contents(self.resources, form, &mut context, device),
+            Contents::Page(page) => {
+                let charge = !self.charged.replace(true);
+                interpret_page_contents(page, self.resources, &mut context, device, charge);
+            }
+        }
     }
 }
 
@@ -97,4 +135,56 @@ pub(crate) fn blends_in_device_cmyk(form: &Dict<'_>) -> bool {
 /// Whether `form`'s transparency group names a blending colour space of its own (`/CS`).
 pub(crate) fn names_a_blending_space(form: &Dict<'_>) -> bool {
     form.get::<Dict<'_>>(GROUP).is_some_and(|g| g.contains_key(CS))
+}
+
+/// PdfCraft patch (68): the most form and pattern resource dictionaries [`page_blends`] reads.
+const MAX_SCANNED_RESOURCES: usize = 512;
+/// PdfCraft patch (68): how deep [`page_blends`] follows forms and patterns into each other.
+const MAX_SCAN_DEPTH: u32 = 16;
+
+/// PdfCraft patch (68): whether anything `page` draws may use a blend mode other than
+/// `Normal`: some graphics state in its resources, or in those of a form or tiling pattern it
+/// reaches, names one. Bounded; a resource tree too large to read counts as blending.
+pub(crate) fn page_blends(page: &Page<'_>) -> bool {
+    let Some(resources) = page.raw().get::<Dict<'_>>(RESOURCES) else {
+        return false;
+    };
+    let mut seen = std::collections::HashSet::new();
+    let mut pending = vec![(resources, 0u32)];
+    while let Some((resources, depth)) = pending.pop() {
+        if let Some(states) = resources.get::<Dict<'_>>(EXT_G_STATE)
+            && states.keys().any(|k| states.get::<Dict<'_>>(k.deref()).is_some_and(|gs| names_a_blend_mode(&gs)))
+        {
+            return true;
+        }
+        for key in [XOBJECT, PATTERN] {
+            let Some(children) = resources.get::<Dict<'_>>(key) else {
+                continue;
+            };
+            for name in children.keys() {
+                let Some(child) = children.get::<Stream<'_>>(name.deref()) else {
+                    continue;
+                };
+                if !seen.insert(child.obj_id()) {
+                    continue;
+                }
+                if seen.len() > MAX_SCANNED_RESOURCES || depth >= MAX_SCAN_DEPTH {
+                    return true;
+                }
+                if let Some(inner) = child.dict().get::<Dict<'_>>(RESOURCES) {
+                    pending.push((inner, depth + 1));
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Whether graphics state `gs` sets `/BM` to anything but `Normal` (or its old name).
+fn names_a_blend_mode(gs: &Dict<'_>) -> bool {
+    let plain = |n: &Name<'_>| matches!(n.deref(), b"Normal" | b"Compatible");
+    if let Some(name) = gs.get::<Name<'_>>(BM) {
+        return !plain(&name);
+    }
+    gs.get::<Array<'_>>(BM).is_some_and(|modes| modes.iter::<Name<'_>>().any(|n| !plain(&n)))
 }
