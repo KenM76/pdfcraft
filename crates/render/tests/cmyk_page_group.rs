@@ -93,8 +93,8 @@ fn a_blend_mode_anywhere_on_a_cmyk_page_blends_in_cmyk() {
 }
 
 /// Controls: an RGB page group, and no page group, blend in RGB as before, so the blend is not
-/// the green ink of the reference square; a CMYK page with content the passes don't cover yet
-/// is drawn as before, the same as the RGB page, and so is a knockout page group.
+/// the green ink of the reference square; a CMYK page with an image, which the passes don't
+/// cover yet, is drawn as before, the same as the RGB page, and so is a knockout page group.
 #[test]
 fn pages_that_dont_blend_in_cmyk_are_drawn_as_before() {
     for cs in [Some("/DeviceRGB"), None] {
@@ -103,14 +103,30 @@ fn pages_that_dont_blend_in_cmyk_are_drawn_as_before() {
         assert!(!close(blended, reference), "{cs:?}: blended in RGB, yet green ink {blended:?}");
     }
 
-    // Content the CMYK passes don't cover yet: an RGB colour, and an image.
-    let image = "q 5 0 0 5 0 0 cm BI /W 1 /H 1 /CS /DeviceRGB /BPC 8 /F /AHx ID ff0000> EI Q";
-    for extra in ["1 0 0 rg 0 0 5 5 re f", image] {
-        let content = format!("{BLEND} {extra}");
-        assert_eq!(render(Some("/DeviceCMYK"), &content).rgba, render(Some("/DeviceRGB"), &content).rgba, "{extra}");
-    }
+    // Content the CMYK passes don't cover yet: an image.
+    let content = format!("{BLEND} q 5 0 0 5 0 0 cm BI /W 1 /H 1 /CS /DeviceRGB /BPC 8 /F /AHx ID ff0000> EI Q");
+    assert_eq!(render(Some("/DeviceCMYK"), &content).rgba, render(Some("/DeviceRGB"), &content).rgba);
 
     // A knockout page group is not drawn in the CMYK passes.
     let knockout = render(Some("/DeviceCMYK /K true"), BLEND);
     assert!(!close(at(&knockout, 150, 50), at(&knockout, 50, 50)), "knockout page blended in CMYK");
+}
+
+/// An RGB colour on a CMYK page is the ink that draws back to it through the CMYK profile
+/// (hayro-interpret patch (69)). Painted without a blend, orange draws as itself. Under
+/// `/BM /Difference` with black ink, a colour's cyan, magenta and yellow are complemented and
+/// its black kept, so 50% grey, mostly cyan, magenta and yellow ink, comes out a warm grey (Acrobat
+/// draws about 137 112 106), neither the neutral grey of RGB blending nor near-black.
+#[test]
+fn an_rgb_colour_on_a_cmyk_page_is_the_ink_that_draws_as_it() {
+    let grey = "q 0.5 0.5 0.5 rg 110 10 80 80 re f /D gs 0 0 0 1 k 110 10 80 80 re f Q";
+    for (rgb, expected) in
+        [("0.8 0.4 0.2", [204, 102, 51]), ("0.3 0.7 0.4", [77, 179, 102]), ("0.9 0.9 0.85", [230, 230, 217]), ("1 1 1", [255, 255, 255])]
+    {
+        let page = render(Some("/DeviceCMYK"), &format!("{rgb} rg 10 10 80 80 re f {grey}"));
+        let (drawn, blended) = (at(&page, 50, 50), at(&page, 150, 50));
+        assert!(close(drawn, expected), "{rgb} drew as {drawn:?}");
+        let [r, g, b] = blended;
+        assert!(r > 100 && r > g && g > b && r - b > 15, "grey under Difference with black: {blended:?}");
+    }
 }

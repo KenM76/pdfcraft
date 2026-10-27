@@ -88,11 +88,12 @@ endstream endobj
         assert!(distance(&group, &square) <= 3, "{mode}: group {group:?}, square {square:?}");
     }
 
-    // A group whose contents have no ink tints (here the second element is RGB) is
-    // composited in RGB exactly as before: the same as a group blending in DeviceRGB.
-    let rgb = |_: [f32; 4]| "1 0 0 rg".to_string();
-    let cmyk_group = render("/CS /DeviceCMYK /I true", &rgb);
-    let rgb_group = render("/CS /DeviceRGB /I true", &rgb);
+    // A group whose contents have no ink tints (here the second element draws an RGB image
+    // over the page) is composited in RGB exactly as before: the same as a group blending
+    // in DeviceRGB.
+    let image = |_: [f32; 4]| "q 370 0 0 60 0 0 cm BI /W 1 /H 1 /CS /DeviceRGB /BPC 8 /F /AHx ID ff0000> EI Q".to_string();
+    let cmyk_group = render("/CS /DeviceCMYK /I true", &image);
+    let rgb_group = render("/CS /DeviceRGB /I true", &image);
     assert_eq!(cmyk_group.rgba, rgb_group.rgba, "contents without tints are drawn as before");
 }
 
