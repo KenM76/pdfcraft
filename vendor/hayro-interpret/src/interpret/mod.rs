@@ -172,10 +172,13 @@ pub fn interpret_page<'a>(
     let resources = page.resources();
     // PdfCraft patch (68): a page group blending in DeviceCMYK (§11.3.4) is offered to the
     // device like an isolated CMYK group, since the page group is isolated (§11.4.7). Only
-    // when its contents use a blend mode: that is where the two spaces give other colours,
-    // and every other CMYK page keeps a single pass.
+    // when its contents use a blend mode, where the two spaces differ most; every other CMYK
+    // page keeps a single pass.
     let (mut drawn, mut charge) = (false, true);
-    if crate::cmyk_group::blends_in_device_cmyk(page.raw()) && crate::cmyk_group::page_blends(page) {
+    if crate::cmyk_group::blends_in_device_cmyk(page.raw())
+        && !crate::cmyk_group::page_knocks_out(page)
+        && crate::cmyk_group::page_blends(page)
+    {
         let group = crate::cmyk_group::CmykGroup::page(page, context);
         drawn = device.draw_isolated_cmyk_group(&group);
         // A device that declined after drawing passes has charged the contents already.
@@ -1050,9 +1053,6 @@ pub fn interpret<'a>(
 /// at its end is incomplete.
 const CONTENT_WINDOW: usize = 64 << 10;
 
-/// PdfCraft patch: interprets the content of a page a window at a time, so the decoded content is
-/// never all in memory (see `ContentReader`). A window ends at an instruction that is not complete
-/// yet: its bytes are kept, and the next window starts with them.
 /// The page's own contents, without its annotations (PdfCraft patch (68): shared with
 /// [`crate::cmyk_group::CmykGroup::interpret`]). `charge` counts them against the page's
 /// content budget; a page interpreted more than once is charged once.
@@ -1072,6 +1072,9 @@ pub(crate) fn interpret_page_contents<'a>(
     interpret_content(&mut content, resources, context, device);
 }
 
+/// PdfCraft patch: interprets the content of a page a window at a time, so the decoded content is
+/// never all in memory (see `ContentReader`). A window ends at an instruction that is not complete
+/// yet: its bytes are kept, and the next window starts with them.
 fn interpret_content<'a>(
     content: &mut ContentReader<'_>,
     resources: &Resources<'a>,

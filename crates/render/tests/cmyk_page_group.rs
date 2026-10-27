@@ -34,17 +34,29 @@ fn stream(dict: &str, content: &str) -> String {
 }
 
 /// Renders a 200 x 100 page with group colour space `cs` (`None`: no `/Group`), the reference
-/// square from 10 to 90, then `content`. Resources: `/D` (`/BM /Difference`), and `/F`, a form
-/// drawing [`BLEND`] with its own `/D`.
+/// square from 10 to 90, then `content`. Resources: `/D` (`/BM /Difference`) when `content`
+/// uses it, `/F`, a form drawing [`BLEND`] with its own `/D`, and `/G`, a form drawing `/F`.
 fn render(cs: Option<&str>, content: &str) -> RenderedPage {
+    render_with(cs, content, false)
+}
+
+/// [`render`], with the page's resources on the `/Pages` node (inherited, §7.7.3.4) when
+/// `inherited`.
+fn render_with(cs: Option<&str>, content: &str, inherited: bool) -> RenderedPage {
     let gs = "/ExtGState << /D << /BM /Difference >> >>";
+    // The page names `/D` only when it uses it, so a blend inside a form is found in the form.
+    let page_gs = if content.contains("/D gs") { gs } else { "" };
+    let resources = format!("/Resources << {page_gs} /XObject << /F 5 0 R /G 6 0 R >> >>");
+    let (on_pages, on_page) = if inherited { (resources.as_str(), "") } else { ("", resources.as_str()) };
     let group = cs.map(|cs| format!("/Group << /S /Transparency /CS {cs} >>")).unwrap_or_default();
+    let form = "/Type /XObject /Subtype /Form /BBox [0 0 200 100]";
     let objects = [
         "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
-        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
-        format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] {group} /Contents 4 0 R /Resources << {gs} /XObject << /F 5 0 R >> >> >>"),
+        format!("<< /Type /Pages /Kids [3 0 R] /Count 1 {on_pages} >>"),
+        format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] {group} /Contents 4 0 R {on_page} >>"),
         stream("", &format!("{GREEN_INK} 10 10 80 80 re f {content}")),
-        stream(&format!("/Type /XObject /Subtype /Form /BBox [0 0 200 100] /Resources << {gs} >>"), BLEND),
+        stream(&format!("{form} /Resources << {gs} >>"), BLEND),
+        stream(&format!("{form} /Resources << /XObject << /F 5 0 R >> >>"), "/F Do"),
     ];
     let mut renderer = PageRenderer::new(Arc::new(pdf(&objects)), RenderConfig::default());
     let page = renderer.render(RenderRequest { page: 0, kind: RequestKind::Pixels, tile: None, scale: 1.0, tag: 0, ..Default::default() });
@@ -69,16 +81,20 @@ fn a_cmyk_page_group_blends_its_contents_in_cmyk() {
     assert!(close(blended, reference), "blended {blended:?}, reference green ink {reference:?}");
 }
 
+/// The blend found through every way a page reaches a graphics state: directly, in a form, in
+/// a form inside a form, and through resources inherited from the page tree.
 #[test]
-fn a_blend_mode_inside_a_form_on_a_cmyk_page_blends_in_cmyk() {
-    let page = render(Some("/DeviceCMYK"), "/F Do");
-    let (reference, blended) = (at(&page, 50, 50), at(&page, 150, 50));
-    assert!(close(blended, reference), "blended {blended:?}, reference green ink {reference:?}");
+fn a_blend_mode_anywhere_on_a_cmyk_page_blends_in_cmyk() {
+    for (content, inherited) in [(BLEND, true), ("/F Do", false), ("/G Do", false), ("/G Do", true)] {
+        let page = render_with(Some("/DeviceCMYK"), content, inherited);
+        let (reference, blended) = (at(&page, 50, 50), at(&page, 150, 50));
+        assert!(close(blended, reference), "{content}, inherited {inherited}: blended {blended:?}, reference {reference:?}");
+    }
 }
 
 /// Controls: an RGB page group, and no page group, blend in RGB as before, so the blend is not
-/// the green ink of the reference square; a CMYK page with content that has no ink tints (an
-/// RGB colour) is drawn as before, the same as the RGB page.
+/// the green ink of the reference square; a CMYK page with content the passes don't cover yet
+/// is drawn as before, the same as the RGB page, and so is a knockout page group.
 #[test]
 fn pages_that_dont_blend_in_cmyk_are_drawn_as_before() {
     for cs in [Some("/DeviceRGB"), None] {
@@ -87,6 +103,14 @@ fn pages_that_dont_blend_in_cmyk_are_drawn_as_before() {
         assert!(!close(blended, reference), "{cs:?}: blended in RGB, yet green ink {blended:?}");
     }
 
-    let with_rgb = format!("{BLEND} 1 0 0 rg 0 0 5 5 re f");
-    assert_eq!(render(Some("/DeviceCMYK"), &with_rgb).rgba, render(Some("/DeviceRGB"), &with_rgb).rgba);
+    // Content the CMYK passes don't cover yet: an RGB colour, and an image.
+    let image = "q 5 0 0 5 0 0 cm BI /W 1 /H 1 /CS /DeviceRGB /BPC 8 /F /AHx ID ff0000> EI Q";
+    for extra in ["1 0 0 rg 0 0 5 5 re f", image] {
+        let content = format!("{BLEND} {extra}");
+        assert_eq!(render(Some("/DeviceCMYK"), &content).rgba, render(Some("/DeviceRGB"), &content).rgba, "{extra}");
+    }
+
+    // A knockout page group is not drawn in the CMYK passes.
+    let knockout = render(Some("/DeviceCMYK /K true"), BLEND);
+    assert!(!close(at(&knockout, 150, 50), at(&knockout, 50, 50)), "knockout page blended in CMYK");
 }

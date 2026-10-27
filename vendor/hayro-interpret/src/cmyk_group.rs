@@ -23,8 +23,8 @@ use crate::device::Device;
 use crate::interpret::interpret_page_contents;
 use crate::interpret::state::{ClipType, State};
 use crate::x_object::{FormXObject, interpret_form_contents};
-use hayro_syntax::object::dict::keys::{BM, CS, EXT_G_STATE, GROUP, PATTERN, RESOURCES, XOBJECT};
-use hayro_syntax::object::{Array, Dict, Name, Stream};
+use hayro_syntax::object::dict::keys::{BM, CS, EXT_G_STATE, FONT, GROUP, K, PATTERN, RESOURCES, XOBJECT};
+use hayro_syntax::object::{Array, Dict, Name, ObjectIdentifier, Stream};
 use hayro_syntax::page::{Page, Resources};
 use hayro_syntax::xref::XRef;
 use kurbo::{Affine, Rect, Shape};
@@ -137,47 +137,91 @@ pub(crate) fn names_a_blending_space(form: &Dict<'_>) -> bool {
     form.get::<Dict<'_>>(GROUP).is_some_and(|g| g.contains_key(CS))
 }
 
-/// PdfCraft patch (68): the most form and pattern resource dictionaries [`page_blends`] reads.
+/// PdfCraft patch (68): whether `page`'s group is a knockout group (`/K true`), which the CMYK
+/// passes don't draw, as for a form.
+pub(crate) fn page_knocks_out(page: &Page<'_>) -> bool {
+    page.raw().get::<Dict<'_>>(GROUP).and_then(|g| g.get::<bool>(K)).unwrap_or(false)
+}
+
+/// PdfCraft patch (68): the most resource dictionaries [`page_blends`] reads (the page's, then
+/// one per form, tiling pattern or Type 3 font it reaches).
 const MAX_SCANNED_RESOURCES: usize = 512;
-/// PdfCraft patch (68): how deep [`page_blends`] follows forms and patterns into each other.
+/// PdfCraft patch (68): how deep [`page_blends`] follows forms, patterns and fonts into each other.
 const MAX_SCAN_DEPTH: u32 = 16;
+/// PdfCraft patch (68): the most graphics states and named resources [`page_blends`] looks at.
+const MAX_SCANNED_ENTRIES: usize = 16_384;
 
 /// PdfCraft patch (68): whether anything `page` draws may use a blend mode other than
-/// `Normal`: some graphics state in its resources, or in those of a form or tiling pattern it
-/// reaches, names one. Bounded; a resource tree too large to read counts as blending.
+/// `Normal`: some graphics state in its resources (inherited ones too), or in those of a form,
+/// tiling pattern or Type 3 font it reaches, names one. Bounded; a resource tree too large to
+/// read counts as blending.
 pub(crate) fn page_blends(page: &Page<'_>) -> bool {
-    let Some(resources) = page.raw().get::<Dict<'_>>(RESOURCES) else {
-        return false;
-    };
-    let mut seen = std::collections::HashSet::new();
-    let mut pending = vec![(resources, 0u32)];
-    while let Some((resources, depth)) = pending.pop() {
-        if let Some(states) = resources.get::<Dict<'_>>(EXT_G_STATE)
-            && states.keys().any(|k| states.get::<Dict<'_>>(k.deref()).is_some_and(|gs| names_a_blend_mode(&gs)))
-        {
+    let mut scan = BlendScan::default();
+    let mut level = Some(page.resources());
+    while let Some(resources) = level {
+        let found = scan.level(&resources.ext_g_states, [&resources.x_objects, &resources.patterns, &resources.fonts], 0);
+        if found != Some(false) {
             return true;
         }
-        for key in [XOBJECT, PATTERN] {
-            let Some(children) = resources.get::<Dict<'_>>(key) else {
-                continue;
-            };
-            for name in children.keys() {
-                let Some(child) = children.get::<Stream<'_>>(name.deref()) else {
-                    continue;
-                };
-                if !seen.insert(child.obj_id()) {
-                    continue;
-                }
-                if seen.len() > MAX_SCANNED_RESOURCES || depth >= MAX_SCAN_DEPTH {
-                    return true;
-                }
-                if let Some(inner) = child.dict().get::<Dict<'_>>(RESOURCES) {
-                    pending.push((inner, depth + 1));
-                }
-            }
+        level = resources.parent();
+    }
+    while let Some((resources, depth)) = scan.pending.pop() {
+        let lists = [XOBJECT, PATTERN, FONT].map(|key| resources.get::<Dict<'_>>(key).unwrap_or_default());
+        let states = resources.get::<Dict<'_>>(EXT_G_STATE).unwrap_or_default();
+        if scan.level(&states, [&lists[0], &lists[1], &lists[2]], depth) != Some(false) {
+            return true;
         }
     }
     false
+}
+
+/// [`page_blends`]'s walk: resource dictionaries still to read, and what it has read.
+#[derive(Default)]
+struct BlendScan<'a> {
+    pending: Vec<(Dict<'a>, u32)>,
+    seen: std::collections::HashSet<ObjectIdentifier>,
+    resources: usize,
+    entries: usize,
+}
+
+impl<'a> BlendScan<'a> {
+    /// Reads one resource dictionary's graphics states and queues the resources of the forms,
+    /// patterns and fonts it names. `Some(true)`: a blend mode; `None`: over a limit.
+    fn level(&mut self, states: &Dict<'a>, lists: [&Dict<'a>; 3], depth: u32) -> Option<bool> {
+        self.resources += 1;
+        if self.resources > MAX_SCANNED_RESOURCES || depth > MAX_SCAN_DEPTH {
+            return None;
+        }
+        for key in states.keys() {
+            self.count()?;
+            if states.get::<Dict<'_>>(key.deref()).is_some_and(|gs| names_a_blend_mode(&gs)) {
+                return Some(true);
+            }
+        }
+        for list in lists {
+            for key in list.keys() {
+                self.count()?;
+                // Only what has resources of its own can reach more graphics states: an image
+                // has none, and neither does a shading pattern or another font.
+                let child = list.get::<Stream<'_>>(key.deref()).map(|s| (Some(s.obj_id()), s.dict().clone()));
+                let Some((id, dict)) = child.or_else(|| list.get::<Dict<'_>>(key.deref()).map(|d| (d.obj_id(), d))) else {
+                    continue;
+                };
+                let Some(inner) = dict.get::<Dict<'_>>(RESOURCES) else {
+                    continue;
+                };
+                if id.is_none_or(|id| self.seen.insert(id)) {
+                    self.pending.push((inner, depth + 1));
+                }
+            }
+        }
+        Some(false)
+    }
+
+    fn count(&mut self) -> Option<()> {
+        self.entries += 1;
+        (self.entries <= MAX_SCANNED_ENTRIES).then_some(())
+    }
 }
 
 /// Whether graphics state `gs` sets `/BM` to anything but `Normal` (or its old name).
