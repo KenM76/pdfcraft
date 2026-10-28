@@ -1350,7 +1350,8 @@ impl ICCProfile {
     }
 
     /// PdfCraft patch (73): `input` through the output intent, then from its CMYK to sRGB as a
-    /// `DeviceCMYK` colour is shown. A chunk at a time, so the buffers stay small.
+    /// `DeviceCMYK` colour is shown. A chunk at a time, so the buffers stay small. `None` when
+    /// no transform builds; the caller then converts plainly.
     fn convert_proofed(&self, (target, intent): &Proof, input: &[f32], output: &mut [u8]) -> Option<()> {
         const CHUNK: usize = 1 << 16;
         let n = self.0.number_components;
@@ -1409,8 +1410,10 @@ impl ICCProfile {
 
 impl ToRgb for ICCProfile {
     fn convert_f32(&self, input: &[f32], output: &mut [u8], _: bool) -> Option<()> {
-        if let Some(proof) = &self.1 {
-            return self.convert_proofed(proof, input, output);
+        if let Some(proof) = &self.1
+            && self.convert_proofed(proof, input, output).is_some()
+        {
+            return Some(());
         }
         let mut temp = vec![0.0_f32; output.len()];
 
@@ -1444,8 +1447,10 @@ impl ToRgb for ICCProfile {
 
     fn convert_u8(&self, input: &[u8], output: &mut [u8]) -> Option<()> {
         if let Some(proof) = &self.1 {
-            let input: Vec<f32> = input.iter().map(|v| f32::from(*v) / 255.0).collect();
-            return self.convert_proofed(proof, &input, output);
+            let scaled: Vec<f32> = input.iter().map(|v| f32::from(*v) / 255.0).collect();
+            if self.convert_proofed(proof, &scaled, output).is_some() {
+                return Some(());
+            }
         }
         if self.is_srgb() {
             output.copy_from_slice(input);
