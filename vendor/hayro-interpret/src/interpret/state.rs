@@ -1,5 +1,6 @@
 use crate::StrokeProps;
-use crate::color::{RenderingIntent, AlphaColor, ColorComponents, ColorSpace};
+use crate::color::{AlphaColor, ColorComponents, ColorSpace, RenderingIntent};
+use crate::overprint::OverprintMode;
 use crate::context::Context;
 use crate::convert::{convert_line_cap, convert_line_join};
 use crate::font::{Font, UNITS_PER_EM};
@@ -10,7 +11,7 @@ use crate::soft_mask::SoftMask;
 use crate::types::BlendMode;
 use crate::util::OptionLog;
 use hayro_syntax::content::ops::{LineCap, LineJoin};
-use hayro_syntax::object::dict::keys::{FONT, SMASK, TR, TR2};
+use hayro_syntax::object::dict::keys::{FONT, OP_NS, SMASK, TR, TR2};
 use hayro_syntax::object::{Array, Dict, Name, Number, Object};
 use hayro_syntax::page::Resources;
 use kurbo::{Affine, BezPath, Vec2};
@@ -98,6 +99,7 @@ impl<'a> State<'a> {
             pattern: self.graphics_state.stroke_pattern.clone(),
             transfer_function: self.graphics_state.transfer_function.clone(),
             intent: self.graphics_state.rendering_intent,
+            overprint: self.graphics_state.stroke_overprint.then_some(self.graphics_state.overprint_mode),
         }
     }
 
@@ -109,6 +111,7 @@ impl<'a> State<'a> {
             pattern: self.graphics_state.non_stroke_pattern.clone(),
             transfer_function: self.graphics_state.transfer_function.clone(),
             intent: self.graphics_state.rendering_intent,
+            overprint: self.graphics_state.fill_overprint.then_some(self.graphics_state.overprint_mode),
         }
     }
 }
@@ -273,6 +276,10 @@ pub(crate) struct GraphicsState<'a> {
     pub(crate) blend_mode: BlendMode,
     /// PdfCraft patch (71): set by `ri` and an ExtGState's `/RI`.
     pub(crate) rendering_intent: RenderingIntent,
+    /// PdfCraft patch (72): `/OP`, `/op` and `/OPM` (ISO 32000-2 §8.6.7).
+    pub(crate) stroke_overprint: bool,
+    pub(crate) fill_overprint: bool,
+    pub(crate) overprint_mode: OverprintMode,
 }
 
 impl Default for GraphicsState<'_> {
@@ -291,6 +298,9 @@ impl Default for GraphicsState<'_> {
             transfer_function: None,
             blend_mode: BlendMode::default(),
             rendering_intent: RenderingIntent::default(),
+            stroke_overprint: false,
+            fill_overprint: false,
+            overprint_mode: OverprintMode::Zero,
         }
     }
 }
@@ -302,6 +312,8 @@ pub(crate) struct PaintData<'a> {
     pub(crate) pattern: Option<Pattern<'a>>,
     pub(crate) transfer_function: Option<ActiveTransferFunction>,
     pub(crate) intent: RenderingIntent,
+    /// PdfCraft patch (72): the overprint mode when overprint is on for this paint.
+    pub(crate) overprint: Option<OverprintMode>,
 }
 
 pub(crate) fn handle_gs<'a>(
@@ -417,6 +429,21 @@ pub(crate) fn handle_gs_single<'a>(
         "RI" => {
             let name = dict.get::<Name<'_>>(key)?;
             context.get_mut().graphics_state.rendering_intent = RenderingIntent::from_name(name.deref());
+        }
+        // PdfCraft patch (72): `/OP` sets fill overprint too unless the dictionary has `/op`.
+        "OP" => {
+            let on = dict.get::<bool>(key)?;
+            let gs = &mut context.get_mut().graphics_state;
+            gs.stroke_overprint = on;
+            if !dict.contains_key(OP_NS) {
+                gs.fill_overprint = on;
+            }
+        }
+        "op" => context.get_mut().graphics_state.fill_overprint = dict.get::<bool>(key)?,
+        "OPM" => {
+            let mode = dict.get::<f32>(key)?;
+            context.get_mut().graphics_state.overprint_mode =
+                if mode == 1.0 { OverprintMode::One } else { OverprintMode::Zero };
         }
         "Type" => {}
         _ => {}

@@ -1,6 +1,6 @@
 use crate::cache::{Cache, DecodedImageCache, DecodedImageKey};
 use crate::cmyk_group::{CmykGroup, blends_in_device_cmyk, names_a_blending_space};
-use crate::color::{ColorComponents, ColorSpace, DefaultColorSpaces, DeviceFamily, ToRgb};
+use crate::color::{ColorComponents, ColorSpace, DefaultColorSpaces, DeviceFamily, ToRgb, f32_to_u8};
 use crate::context::Context;
 use crate::device::Device;
 use crate::function::{Function, interpolate};
@@ -438,7 +438,9 @@ pub(crate) fn draw_image_xobject<'a, 'b>(
             image_xobject: x_object.clone(),
         })
     } else {
-        Image::Raster(RasterImage(x_object.clone()))
+        let mut raster = x_object.clone();
+        raster.overprint = context.get().graphics_state.fill_overprint;
+        Image::Raster(RasterImage(raster))
     };
 
     device.draw_image(image, transform);
@@ -469,7 +471,7 @@ fn xobject_oc(dict: &Dict<'_>, context: &mut Context<'_>) -> bool {
 pub(crate) struct ImageXObject<'a> {
     width: u32,
     height: u32,
-    color_space: Option<ColorSpace>,
+    pub(crate) color_space: Option<ColorSpace>,
     cache: Cache,
     /// PdfCraft patch: decoded pixels shared across renders (see `decoded_raster`); `None`
     /// for an image that is never cached (an inline image).
@@ -483,6 +485,8 @@ pub(crate) struct ImageXObject<'a> {
     /// PdfCraft patch (38): the cache key of the default colour space drawn in place of the
     /// image's device space, if one is.
     default_space: Option<u128>,
+    /// PdfCraft patch (72): whether the image is painted with fill overprint on.
+    pub(crate) overprint: bool,
 }
 
 impl<'a> ImageXObject<'a> {
@@ -562,6 +566,7 @@ impl<'a> ImageXObject<'a> {
             is_mask,
             is_stencil_mask,
             default_space,
+            overprint: false,
         })
     }
 
@@ -1008,6 +1013,48 @@ fn decode_raster(
         .flatten()
     };
 
+    Some(DecodedRaster { image, alpha })
+}
+
+/// PdfCraft patch (72): `obj` decoded as one ink: component `component` of each sample as a gray
+/// of `1 − tint` (no ink is white), with the image's alpha. Not cached: an ink pass decodes once.
+pub(crate) fn decode_ink(
+    obj: &ImageXObject<'_>,
+    component: usize,
+    target_dimension: Option<(u32, u32)>,
+) -> Option<DecodedRaster> {
+    let mut ctx = decode_context(obj, target_dimension)?;
+    let mut height = ctx.height;
+    let n = usize::from(ctx.color_space.num_components());
+    if n == 0 || component >= n {
+        return None;
+    }
+    let components = get_components(&ctx.decoded.data, ctx.width, height, &ctx.color_space, ctx.bits_per_component)?;
+    let mut samples = apply_decode_array(&components, &ctx.color_space, ctx.bits_per_component, &ctx.decode_arr)?;
+    fix_image_length(&mut samples, ctx.width, &mut height, 0.0, &ctx.color_space)?;
+    let data = samples
+        .chunks_exact(n)
+        .map(|px| f32_to_u8(1.0 - px.get(component).copied().unwrap_or(0.0).clamp(0.0, 1.0)))
+        .collect();
+    let image = ImageData::Luma(LumaData {
+        data,
+        width: ctx.width,
+        height,
+        interpolate: obj.interpolate,
+        scale_factors: ctx.scale_factors,
+    });
+    let alpha = resolve_alpha(
+        obj,
+        &mut ctx.decoded,
+        Some(&image),
+        &ctx.color_space,
+        ctx.bits_per_component,
+        ctx.width,
+        &mut height,
+        ctx.scale_factors,
+        target_dimension,
+    )
+    .flatten();
     Some(DecodedRaster { image, alpha })
 }
 

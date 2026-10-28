@@ -93,6 +93,30 @@ impl RasterImage<'_> {
         self.0.stream()
     }
 
+    /// PdfCraft patch (72): where this image gets ink `channel`'s tint from, under its
+    /// overprint setting.
+    pub fn ink_source(&self, channel: &crate::overprint::Channel) -> crate::overprint::ChannelSource {
+        crate::overprint::channel_source(self.0.color_space.as_ref(), channel, self.0.overprint)
+    }
+
+    /// PdfCraft patch (72): the spot inks this image's colour space names.
+    pub fn spots(&self) -> Vec<crate::overprint::Spot> {
+        self.0.color_space.as_ref().map(|cs| crate::overprint::spots_of(cs).into_vec()).unwrap_or_default()
+    }
+
+    /// PdfCraft patch (72): like [`Self::with_rgba`], with the image as a gray of one ink:
+    /// `1 − tint` of component `component` (see [`Self::ink_source`]).
+    pub fn with_ink(
+        &self,
+        component: usize,
+        func: impl FnOnce(ImageData, Option<LumaData>),
+        target_dimension: Option<(u32, u32)>,
+    ) {
+        if let Some(decoded) = crate::x_object::decode_ink(&self.0, component, target_dimension) {
+            func(decoded.image, decoded.alpha);
+        }
+    }
+
     // These are hidden since clients are supposed to call get the
     // width/height from `LumaData` instead.
     #[doc(hidden)]

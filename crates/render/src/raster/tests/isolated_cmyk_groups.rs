@@ -33,6 +33,11 @@ fn isolated_groups_blend_in_device_cmyk() {
         ("Hue", [0.0, 0.5, 0.0, 0.3], [1.0, 0.0, 0.0, 0.0], [0.645, 0.145, 0.145, 0.3]),
         // (1,0,1) at the luminosity of (0,1,0), clipped: (1,0.3051,1); K is the source's.
         ("Luminosity", [0.0, 1.0, 0.0, 0.3], [1.0, 0.0, 1.0, 0.0], [0.0, 0.6949, 0.0, 0.0]),
+        // Separable modes with both branches in play, each component complemented, blended
+        // (§11.3.5.2, SoftLight's D(x) included) and complemented back.
+        ("Overlay", [0.2, 0.6, 0.9, 0.1], [0.7, 0.3, 0.5, 0.4], [0.28, 0.44, 0.9, 0.08]),
+        ("SoftLight", [0.2, 0.6, 0.9, 0.1], [0.7, 0.3, 0.5, 0.4], [0.264, 0.507, 0.9, 0.0903]),
+        ("HardLight", [0.2, 0.6, 0.9, 0.1], [0.7, 0.3, 0.5, 0.4], [0.52, 0.36, 0.9, 0.08]),
     ];
     let tint = |t: [f32; 4]| format!("{} {} {} {} k", t[0], t[1], t[2], t[3]);
     // `group`: the cell group's /Group entries; `b`: what the second element paints.

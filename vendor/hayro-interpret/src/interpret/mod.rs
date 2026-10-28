@@ -175,11 +175,18 @@ pub fn interpret_page<'a>(
     // when its contents use a blend mode, where the two spaces differ most; every other CMYK
     // page keeps a single pass.
     let (mut drawn, mut charge) = (false, true);
-    if crate::cmyk_group::blends_in_device_cmyk(page.raw())
-        && !crate::cmyk_group::page_knocks_out(page)
-        && crate::cmyk_group::page_blends(page)
+    // PdfCraft patch (72): overprint acts in the output device's space (§11.7.4.5), so a page
+    // that overprints with no blending space of its own but a CMYK output intent takes the
+    // same path. Blending alone keeps to pages that name `DeviceCMYK`.
+    let device_cmyk = crate::cmyk_group::blends_in_device_cmyk(page.raw());
+    let overprint = (device_cmyk
+        || (!crate::cmyk_group::names_a_blending_space(page.raw())
+            && crate::OutputIntent::of(context.xref, &context.interpreter_cache.object_cache).is_some()))
+        && crate::cmyk_group::page_overprints(page);
+    let blends = device_cmyk && crate::cmyk_group::page_blends(page);
+    if !crate::cmyk_group::page_knocks_out(page) && (overprint || blends)
     {
-        let group = crate::cmyk_group::CmykGroup::page(page, context);
+        let group = crate::cmyk_group::CmykGroup::page(page, context, overprint, blends);
         drawn = device.draw_isolated_cmyk_group(&group);
         // A device that declined after drawing passes has charged the contents already.
         charge = !group.charged();

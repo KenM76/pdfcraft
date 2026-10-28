@@ -4,8 +4,7 @@
 //!
 //! Adapted from pdfcer (MIT, same author), `pdfcer-render/src/overprint.rs`.
 
-use crate::color::{ColorSpace, ColorSpaceType, RenderingIntent};
-use crate::output_intent::OutputIntent;
+use crate::color::{ColorSpace, ColorSpaceType};
 use smallvec::SmallVec;
 
 /// What a paint does to one ink.
@@ -39,7 +38,7 @@ pub struct Spot {
 impl Spot {
     /// The colour of this ink alone at `tint`, through its space's alternate, in sRGB.
     pub fn srgb(&self, tint: f32) -> [f32; 3] {
-        let n = self.space.num_components().max(1);
+        let n = usize::from(self.space.num_components().max(1));
         let mut c: SmallVec<[f32; 8]> = SmallVec::from_elem(0.0, n);
         if let Some(slot) = c.get_mut(self.index) {
             *slot = tint.clamp(0.0, 1.0);
@@ -88,7 +87,7 @@ pub(crate) fn ink_paint(
         spots: SmallVec::new(),
         other_spots: unnamed,
     };
-    let colorants: SmallVec<[&[u8]; 4]> = match space.0.as_ref() {
+    let colorants: SmallVec<[&[u8]; 4]> = match space.kind() {
         ColorSpaceType::DeviceCmyk => {
             let tints = [get(0), get(1), get(2), get(3)];
             // Table 149: only a direct DeviceCMYK paint under OPM 1 keeps an ink it has none of.
@@ -125,7 +124,63 @@ pub(crate) fn ink_paint(
     Some(paint)
 }
 
-/// The process tints of an ICC-managed or other non-colorant colour, for [`ink_paint`].
-pub(crate) fn process_target(target: Option<&OutputIntent>, intent: RenderingIntent) -> Option<(&OutputIntent, RenderingIntent)> {
-    target.map(|t| (t, intent))
+
+/// PdfCraft patch (72): one ink of a `DeviceCMYK` blending space.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Channel {
+    /// Cyan, magenta, yellow or black (0..=3).
+    Process(usize),
+    /// A spot ink, by colorant name.
+    Spot(Vec<u8>),
+}
+
+/// PdfCraft patch (72): where an image's samples get one ink's tint from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChannelSource {
+    /// The image's component at this index.
+    Component(usize),
+    /// The image's colour converted to process tints (it has no colorants of its own).
+    Converted,
+    /// The image leaves this ink alone (overprint).
+    Keep,
+    /// The image knocks this ink out.
+    Zero,
+}
+
+/// Where an image in `space` painted with overprint `overprint` gets `channel`'s tint from.
+/// An image is never subject to `OPM 1` (ISO 32000-2 §8.6.7: it applies to `DeviceCMYK` paints
+/// only), so overprint keeps exactly the inks its space doesn't name.
+pub(crate) fn channel_source(space: Option<&ColorSpace>, channel: &Channel, overprint: bool) -> ChannelSource {
+    let unnamed = if overprint { ChannelSource::Keep } else { ChannelSource::Zero };
+    let named = |names: &[&[u8]]| {
+        let wanted: &[u8] = match channel {
+            Channel::Process(i) => PROCESS.get(*i).copied().unwrap_or_default(),
+            Channel::Spot(name) => name,
+        };
+        names.iter().position(|n| *n == wanted).map_or(unnamed, ChannelSource::Component)
+    };
+    match space.map(ColorSpace::kind) {
+        Some(ColorSpaceType::DeviceCmyk) => match channel {
+            Channel::Process(i) if *i < 4 => ChannelSource::Component(*i),
+            _ => unnamed,
+        },
+        Some(ColorSpaceType::Separation(s)) if s.is_all => ChannelSource::Component(0),
+        Some(ColorSpaceType::Separation(s)) => named(&[s.name.as_slice()]),
+        Some(ColorSpaceType::DeviceN(d)) => {
+            let names: SmallVec<[&[u8]; 8]> = d.names.iter().map(Vec::as_slice).collect();
+            named(&names)
+        }
+        _ => match channel {
+            Channel::Process(_) => ChannelSource::Converted,
+            Channel::Spot(_) => unnamed,
+        },
+    }
+}
+
+/// The spot inks `space` names, for an image or shading in it.
+pub(crate) fn spots_of(space: &ColorSpace) -> SmallVec<[Spot; 2]> {
+    let initial = space.initial_color();
+    ink_paint(space, &initial, None, || Some([0.0; 4]))
+        .map(|p| p.spots.into_iter().map(|(s, _)| s).collect())
+        .unwrap_or_default()
 }

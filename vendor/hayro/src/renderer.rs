@@ -496,7 +496,13 @@ struct InkState {
     /// Something in the group has no ink tints (a pattern, an image, an ICCBased CMYK colour):
     /// the group is drawn as before instead.
     unsupported: bool,
+    /// PdfCraft patch (72): the spot inks the group's paints name, in the order met; a
+    /// [`InkPass::Spot`] pass indexes it.
+    spots: Vec<hayro_interpret::Spot>,
 }
+
+/// PdfCraft patch (72): the most spot inks an overprinting group is drawn with.
+const MAX_SPOTS: usize = 4;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum InkPass {
@@ -504,12 +510,26 @@ enum InkPass {
     Cmy,
     /// Black as grey.
     K,
+    /// PdfCraft patch (72): one process ink (0 cyan … 3 black) as grey, for overprint.
+    Process(u8),
+    /// PdfCraft patch (72): spot ink `spots[i]` as grey, for overprint.
+    Spot(u8),
+}
+
+impl InkPass {
+    /// Whether the pass draws one ink alone, under overprint.
+    fn is_channel(self) -> bool {
+        matches!(self, Self::Process(_) | Self::Spot(_))
+    }
 }
 
 impl InkState {
     /// The colour a pass paints for `color`; transparent, with the group marked unsupported,
     /// when the colour has no ink tints.
     fn paint(&mut self, pass: InkPass, color: &Color) -> AlphaColor<Srgb> {
+        if pass.is_channel() {
+            return self.channel_paint(pass, color);
+        }
         let Some(([c, m, y, k], alpha)) = color.ink_tints(self.target.as_deref()) else {
             self.unsupported = true;
             return AlphaColor::TRANSPARENT;
@@ -517,6 +537,55 @@ impl InkState {
         match pass {
             InkPass::Cmy => AlphaColor::new([1.0 - c, 1.0 - m, 1.0 - y, alpha]),
             InkPass::K => AlphaColor::new([1.0 - k, 1.0 - k, 1.0 - k, alpha]),
+            InkPass::Process(_) | InkPass::Spot(_) => AlphaColor::TRANSPARENT,
+        }
+    }
+
+    /// PdfCraft patch (72): what one-ink pass `pass` paints for `color` under its overprint
+    /// setting: the ink's tint as a grey, or nothing where the paint keeps the ink.
+    fn channel_paint(&mut self, pass: InkPass, color: &Color) -> AlphaColor<Srgb> {
+        let Some((paint, alpha)) = color.ink_paint(self.target.as_deref()) else {
+            self.unsupported = true;
+            return AlphaColor::TRANSPARENT;
+        };
+        for (spot, _) in &paint.spots {
+            self.register(spot);
+        }
+        let ink = match pass {
+            InkPass::Process(i) => paint.process.get(usize::from(i)).copied(),
+            InkPass::Spot(i) => self.spots.get(usize::from(i)).map(|s| paint.spot(&s.name)),
+            InkPass::Cmy | InkPass::K => None,
+        };
+        match ink {
+            Some(hayro_interpret::Ink::Paint(t)) => {
+                let g = 1.0 - t.clamp(0.0, 1.0);
+                AlphaColor::new([g, g, g, alpha])
+            }
+            _ => AlphaColor::TRANSPARENT,
+        }
+    }
+
+    /// PdfCraft patch (72): records spot ink `spot`; past [`MAX_SPOTS`] the group is unsupported.
+    fn register(&mut self, spot: &hayro_interpret::Spot) {
+        if self.spots.iter().any(|s| s.name == spot.name) {
+            return;
+        }
+        if self.spots.len() >= MAX_SPOTS {
+            self.unsupported = true;
+            return;
+        }
+        self.spots.push(spot.clone());
+    }
+
+    /// PdfCraft patch (72): the ink a one-ink pass draws, as the interpreter names it.
+    fn channel(&self, pass: InkPass) -> Option<hayro_interpret::Channel> {
+        match pass {
+            InkPass::Process(i) => Some(hayro_interpret::Channel::Process(usize::from(i))),
+            InkPass::Spot(i) => self
+                .spots
+                .get(usize::from(i))
+                .map(|s| hayro_interpret::Channel::Spot(s.name.clone())),
+            InkPass::Cmy | InkPass::K => None,
         }
     }
 }
@@ -530,7 +599,7 @@ fn ink_image(image: ImageData, pass: InkPass) -> Option<ImageData> {
     match image {
         ImageData::Luma(mut l) => {
             // Gray is black ink alone: the CMY pass paints no ink, the K pass the gray itself.
-            if pass == InkPass::Cmy {
+            if !matches!(pass, InkPass::K | InkPass::Process(3)) {
                 l.data.iter_mut().for_each(|v| *v = 255);
             }
             Some(ImageData::Luma(l))
@@ -547,6 +616,10 @@ fn ink_image(image: ImageData, pass: InkPass) -> Option<ImageData> {
                         let out = match pass {
                             InkPass::Cmy => [to_byte(c), to_byte(m), to_byte(y)],
                             InkPass::K => [to_byte(k); 3],
+                            InkPass::Process(i) => {
+                                [to_byte([c, m, y, k].get(usize::from(i)).copied().unwrap_or(0.0)); 3]
+                            }
+                            InkPass::Spot(_) => [255; 3],
                         };
                         last = Some((key, out));
                         out
@@ -555,6 +628,20 @@ fn ink_image(image: ImageData, pass: InkPass) -> Option<ImageData> {
                 *px = out;
             }
             Some(ImageData::Rgb(r))
+        }
+    }
+}
+
+/// PdfCraft patch (72): `image` with every pixel white (no ink).
+fn white_image(image: ImageData) -> ImageData {
+    match image {
+        ImageData::Luma(mut l) => {
+            l.data.iter_mut().for_each(|v| *v = 255);
+            ImageData::Luma(l)
+        }
+        ImageData::Rgb(mut r) => {
+            r.data.iter_mut().for_each(|v| *v = 255);
+            ImageData::Rgb(r)
         }
     }
 }
@@ -1198,7 +1285,131 @@ impl Renderer {
             .fill_rect(&Rect::new(0.0, 0.0, width as f64, height as f64));
     }
 
-    /// PdfCraft patch (27): one ink pass of `group` (see [`InkState`]) on a `width` × `height`
+    /// PdfCraft patch (72): raster image `r` in one-ink pass `pass`: its component naming the
+    /// ink, its process tints when it names none, white where it knocks the ink out, and nothing
+    /// where it overprints the ink.
+    fn draw_channel_image(
+        &mut self,
+        r: &hayro_interpret::RasterImage<'_>,
+        pass: InkPass,
+        mut transform: Affine,
+        target: (u32, u32),
+    ) {
+        use hayro_interpret::ChannelSource;
+        for spot in r.spots() {
+            self.ink.register(&spot);
+        }
+        let Some(channel) = self.ink.channel(pass) else {
+            self.ink.unsupported = true;
+            return;
+        };
+        let mut draw = |this: &mut Self, image: ImageData, alpha: Option<LumaData>| {
+            let (sx, sy) = image.scale_factors();
+            transform *= Affine::scale_non_uniform(sx as f64, sy as f64);
+            this.ctx.set_transform(transform);
+            this.draw_image(image, alpha);
+        };
+        match r.ink_source(&channel) {
+            ChannelSource::Keep => {}
+            ChannelSource::Component(i) => {
+                r.with_ink(i, |image, alpha| draw(self, image, alpha), Some(target));
+            }
+            ChannelSource::Converted | ChannelSource::Zero => {
+                let zero = r.ink_source(&channel) == ChannelSource::Zero;
+                r.with_rgba(
+                    |image, alpha| {
+                        let image = if zero { Some(white_image(image)) } else { ink_image(image, pass) };
+                        match image {
+                            Some(image) => draw(self, image, alpha),
+                            None => self.ink.unsupported = true,
+                        }
+                    },
+                    Some(target),
+                );
+            }
+        }
+    }
+
+    /// PdfCraft patch (72): an overprinting `DeviceCMYK` group (ISO 32000-2 §11.7.4.5), drawn
+    /// one ink at a time so a paint can leave the inks it doesn't name: the four process inks,
+    /// then each spot ink they met (at most [`MAX_SPOTS`]). The process tints convert through
+    /// the CMYK profile and each spot multiplies in its alternate colour. `None` when a pass
+    /// can't be drawn.
+    fn overprint_group(
+        &self,
+        group: &hayro_interpret::CmykGroup<'_, '_>,
+        offset: (f64, f64),
+        width: u16,
+        height: u16,
+    ) -> Option<Pixmap> {
+        let mut spots = Vec::new();
+        let mut passes = Vec::with_capacity(4 + MAX_SPOTS);
+        for i in 0..4 {
+            passes.push(self.ink_pass(group, InkPass::Process(i), offset, width, height, &mut spots)?);
+        }
+        let met = spots.clone();
+        for i in 0..met.len() {
+            let i = u8::try_from(i).ok()?;
+            passes.push(self.ink_pass(group, InkPass::Spot(i), offset, width, height, &mut spots)?);
+        }
+        // A pass's tint is its premultiplied grey un-premultiplied and complemented.
+        let tint = |px: &PremulRgba8| -> f32 {
+            if px.a == 0 {
+                return 0.0;
+            }
+            1.0 - (f32::from(px.r) / f32::from(px.a)).min(1.0)
+        };
+        let pixels = usize::from(width) * usize::from(height);
+        let mut tints = Vec::with_capacity(pixels * 4);
+        let mut coverage = vec![0u8; pixels];
+        for (p, cover) in coverage.iter_mut().enumerate() {
+            for (n, pass) in passes.iter().enumerate() {
+                let px = pass.data().get(p).copied().unwrap_or(PremulRgba8 { r: 0, g: 0, b: 0, a: 0 });
+                if n < 4 {
+                    tints.push((tint(&px) * 255.0).round() as u8);
+                }
+                *cover = (*cover).max(px.a);
+            }
+        }
+        let mut rgb = vec![0u8; pixels * 3];
+        hayro_interpret::color::cmyk_to_srgb8(&tints, &mut rgb)?;
+        let mut result = Pixmap::new(width, height);
+        for (p, ((px, rgb), cover)) in result
+            .data_mut()
+            .iter_mut()
+            .zip(rgb.chunks_exact(3))
+            .zip(&coverage)
+            .enumerate()
+        {
+            let mut c = [rgb[0], rgb[1], rgb[2]].map(|v| f32::from(v) / 255.0);
+            for (spot, pass) in met.iter().zip(passes.iter().skip(4)) {
+                let px = pass.data().get(p).copied().unwrap_or(PremulRgba8 { r: 0, g: 0, b: 0, a: 0 });
+                let t = tint(&px);
+                if t > 0.0 {
+                    let s = spot.srgb(t);
+                    c = [c[0] * s[0], c[1] * s[1], c[2] * s[2]];
+                }
+            }
+            let a = f32::from(*cover) / 255.0;
+            let premul = |v: f32| (v.clamp(0.0, 1.0) * a * 255.0).round() as u8;
+            *px = PremulRgba8 { r: premul(c[0]), g: premul(c[1]), b: premul(c[2]), a: *cover };
+        }
+        Some(result)
+    }
+
+    /// PdfCraft patch (72): a nonseparable mode mixes inks, so a one-ink pass can't draw it.
+    fn refuse_nonseparable_in_channel(&mut self, blend_mode: BlendMode) {
+        if self.ink.pass.is_some_and(InkPass::is_channel)
+            && matches!(
+                blend_mode,
+                BlendMode::Hue | BlendMode::Saturation | BlendMode::Color | BlendMode::Luminosity
+            )
+        {
+            self.ink.unsupported = true;
+        }
+    }
+
+    /// PdfCraft patch (21): one ink pass of `group` (see [`InkState`]) on a `width` × `height`
     /// canvas whose corner is device point `offset`; `None` when the group holds something the
     /// pass has no tints for.
     fn ink_pass(
@@ -1208,6 +1419,7 @@ impl Renderer {
         offset: (f64, f64),
         width: u16,
         height: u16,
+        spots: &mut Vec<hayro_interpret::Spot>,
     ) -> Option<Pixmap> {
         let mut renderer = Self {
             ctx: RenderContext::new_with(width, height, derive_settings(self.ctx.render_settings())),
@@ -1225,6 +1437,7 @@ impl Renderer {
                 pass: Some(pass),
                 target: group.output_intent(),
                 unsupported: false,
+                spots: core::mem::take(spots),
             },
             knockout: Vec::new(),
             erasing: false,
@@ -1237,6 +1450,7 @@ impl Renderer {
         renderer.ctx.push_layer(None, None, None, None, None);
         group.interpret(&mut renderer, offset);
         renderer.ctx.pop_layer();
+        *spots = core::mem::take(&mut renderer.ink.spots);
         if renderer.ink.unsupported {
             return None;
         }
@@ -1920,6 +2134,12 @@ impl<'a> Device<'a> for Renderer {
                 );
             }
             hayro_interpret::Image::Raster(r) => {
+                // PdfCraft patch (72): a one-ink pass draws the image's own tints of its ink.
+                if let Some(pass) = self.ink.pass.filter(|p| p.is_channel()) {
+                    self.draw_channel_image(&r, pass, transform, (target_width, target_height));
+                    self.ctx.set_aliasing_threshold(None);
+                    return;
+                }
                 r.with_rgba(
                     |image, alpha| {
                         let (sx, sy) = image.scale_factors();
@@ -1987,10 +2207,22 @@ impl<'a> Device<'a> for Renderer {
             return false;
         }
 
-        let Some(cmy) = self.ink_pass(group, InkPass::Cmy, (x0, y0), width, height) else {
+        if group.overprints() {
+            if let Some(result) = self.overprint_group(group, (x0, y0), width, height) {
+                self.set_soft_mask(None);
+                self.set_blend_mode(BlendMode::Normal);
+                self.draw_pixmap(Arc::new(result), ImageQuality::Low, Affine::translate((x0, y0)));
+                return true;
+            }
+            if !group.blends() {
+                return false;
+            }
+        }
+        let mut spots = Vec::new();
+        let Some(cmy) = self.ink_pass(group, InkPass::Cmy, (x0, y0), width, height, &mut spots) else {
             return false;
         };
-        let Some(k) = self.ink_pass(group, InkPass::K, (x0, y0), width, height) else {
+        let Some(k) = self.ink_pass(group, InkPass::K, (x0, y0), width, height, &mut spots) else {
             return false;
         };
 
@@ -2037,6 +2269,7 @@ impl<'a> Device<'a> for Renderer {
         mask: Option<SoftMask<'_>>,
         blend_mode: BlendMode,
     ) {
+        self.refuse_nonseparable_in_channel(blend_mode);
         // PdfCraft patch (22): nothing is layered in a knockout erase pass.
         if self.erasing {
             self.erase_groups += 1;
@@ -2294,6 +2527,7 @@ impl<'a> Device<'a> for Renderer {
     }
 
     fn set_blend_mode(&mut self, blend_mode: BlendMode) {
+        self.refuse_nonseparable_in_channel(blend_mode);
         // PdfCraft patch (26): the blend mode of the element about to paint, for its pass (an
         // erase pass paints nothing, and its content's modes are not the element's).
         if !self.erasing

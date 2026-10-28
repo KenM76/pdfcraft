@@ -3,6 +3,7 @@
 use crate::cache::{Cache, CacheKey};
 use crate::function::Function;
 use crate::output_intent::OutputIntent;
+use crate::overprint::{InkPaint, OverprintMode, ink_paint};
 use crate::util::hash128;
 use hayro_syntax::object;
 use hayro_syntax::object::Array;
@@ -289,6 +290,11 @@ impl ColorSpaceType {
 pub struct ColorSpace(Arc<ColorSpaceType>);
 
 impl ColorSpace {
+    /// PdfCraft patch (72): what kind of space this is.
+    pub(crate) fn kind(&self) -> &ColorSpaceType {
+        &self.0
+    }
+
     /// Create a new color space from the given object.
     pub(crate) fn new(object: Object<'_>, cache: &Cache) -> Option<Self> {
         Some(Self(Arc::new(ColorSpaceType::new(object, cache)?)))
@@ -1068,7 +1074,9 @@ pub(crate) struct Separation {
     tint_transform: Option<Function>,
     is_none_separation: bool,
     /// PdfCraft patch (66): the colourant is the special name `All`.
-    is_all: bool,
+    pub(crate) is_all: bool,
+    /// PdfCraft patch (72): the colourant's name.
+    pub(crate) name: Vec<u8>,
 }
 
 /// PdfCraft patch (55): `tint_transform` run on the tints of one colour, or, when it cannot be
@@ -1109,6 +1117,7 @@ impl Separation {
             tint_transform,
             is_none_separation,
             is_all,
+            name: name.deref().to_vec(),
         })
     }
 }
@@ -1154,6 +1163,8 @@ pub(crate) struct DeviceN {
     /// `eval_tint_transform`).
     tint_transform: Option<Function>,
     is_none: bool,
+    /// PdfCraft patch (72): the colourants' names.
+    pub(crate) names: Vec<Vec<u8>>,
 }
 
 impl DeviceN {
@@ -1182,6 +1193,7 @@ impl DeviceN {
             num_components,
             tint_transform,
             is_none: all_none,
+            names: names.iter().map(|n| n.deref().to_vec()).collect(),
         })
     }
 }
@@ -1365,7 +1377,7 @@ impl ToRgb for ICCProfile {
 }
 
 #[inline(always)]
-fn f32_to_u8(val: f32) -> u8 {
+pub(crate) fn f32_to_u8(val: f32) -> u8 {
     (val * 255.0 + 0.5) as u8
 }
 
@@ -1398,6 +1410,8 @@ pub struct Color {
     opacity: f32,
     /// PdfCraft patch (71).
     intent: RenderingIntent,
+    /// PdfCraft patch (72): the overprint mode when overprint is on for this paint.
+    overprint: Option<OverprintMode>,
 }
 
 /// PdfCraft patch (71): a rendering intent (ISO 32000-2 §8.6.5.8).
@@ -1448,6 +1462,7 @@ impl Color {
             components,
             opacity,
             intent: RenderingIntent::default(),
+            overprint: None,
         }
     }
 
@@ -1455,6 +1470,22 @@ impl Color {
     pub(crate) fn with_intent(mut self, intent: RenderingIntent) -> Self {
         self.intent = intent;
         self
+    }
+
+    /// PdfCraft patch (72): this colour with overprint `overprint` (`None`: off).
+    pub(crate) fn with_overprint(mut self, overprint: Option<OverprintMode>) -> Self {
+        self.overprint = overprint;
+        self
+    }
+
+    /// PdfCraft patch (72): what this colour does to each ink of a `DeviceCMYK` blending space
+    /// under its overprint setting, with its opacity; process tints of a colour without
+    /// colorants of its own go through `target` as [`Self::ink_tints`] does.
+    pub fn ink_paint(&self, target: Option<&OutputIntent>) -> Option<(InkPaint, f32)> {
+        let paint = ink_paint(&self.color_space, &self.components, self.overprint, || {
+            self.ink_tints(target).map(|(t, _)| t)
+        })?;
+        Some((paint, self.opacity.clamp(0.0, 1.0)))
     }
 
     /// Return the color as an RGBA color.
@@ -1482,6 +1513,7 @@ impl Color {
             components: smallvec![c[0], c[1], c[2]],
             opacity: c[3],
             intent: RenderingIntent::default(),
+            overprint: None,
         }
     }
 }

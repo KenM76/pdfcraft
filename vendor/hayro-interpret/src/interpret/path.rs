@@ -176,7 +176,8 @@ pub(crate) fn get_paint<'a>(context: &Context<'a>, is_stroke: bool) -> Paint<'a>
         } else {
             Color::new(data.color_space, data.color, data.alpha)
         }
-        .with_intent(data.intent);
+        .with_intent(data.intent)
+        .with_overprint(data.overprint);
 
         if let Some(tf) = &data.transfer_function {
             Paint::Color(Color::from_rgba(tf.apply(&color.to_rgba())))

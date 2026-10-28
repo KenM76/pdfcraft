@@ -23,7 +23,7 @@ use crate::device::Device;
 use crate::interpret::interpret_page_contents;
 use crate::interpret::state::{ClipType, State};
 use crate::x_object::{FormXObject, interpret_form_contents};
-use hayro_syntax::object::dict::keys::{BM, CS, EXT_G_STATE, FONT, GROUP, K, PATTERN, RESOURCES, XOBJECT};
+use hayro_syntax::object::dict::keys::{BM, CS, EXT_G_STATE, FONT, GROUP, K, OP, OP_NS, PATTERN, RESOURCES, XOBJECT};
 use hayro_syntax::object::{Array, Dict, Name, ObjectIdentifier, Stream};
 use hayro_syntax::page::{Page, Resources};
 use hayro_syntax::xref::XRef;
@@ -48,6 +48,11 @@ pub struct CmykGroup<'a, 'b> {
     nesting_depth: u32,
     /// Whether a page's contents were charged to its content budget yet (patch (68)).
     charged: Cell<bool>,
+    /// PdfCraft patch (72): whether the contents may set overprint.
+    overprint: bool,
+    /// PdfCraft patch (72): whether the contents blend in `DeviceCMYK` without overprint, so
+    /// the two-pass drawing suits them when the per-ink one can't be done.
+    blends: bool,
 }
 
 /// What a [`CmykGroup`] draws: a form's contents, or a page's (patch (68)).
@@ -62,8 +67,20 @@ impl<'a, 'b> CmykGroup<'a, 'b> {
     }
 
     /// PdfCraft patch (68): the contents of `page`, whose group blends in `DeviceCMYK`.
-    pub(crate) fn page(page: &'b Page<'a>, context: &Context<'a>) -> Self {
-        Self::with(Contents::Page(page), page.resources(), context)
+    pub(crate) fn page(page: &'b Page<'a>, context: &Context<'a>, overprint: bool, blends: bool) -> Self {
+        Self { overprint, blends, ..Self::with(Contents::Page(page), page.resources(), context) }
+    }
+
+    /// PdfCraft patch (72): whether the group may be drawn ignoring overprint, as two passes,
+    /// when [`Self::overprints`] and the per-ink drawing fails.
+    pub fn blends(&self) -> bool {
+        self.blends
+    }
+
+    /// PdfCraft patch (72): whether the contents may set overprint, so each ink needs a pass
+    /// of its own.
+    pub fn overprints(&self) -> bool {
+        self.overprint
     }
 
     fn with(contents: Contents<'a, 'b>, resources: &'b Resources<'a>, context: &Context<'a>) -> Self {
@@ -82,6 +99,8 @@ impl<'a, 'b> CmykGroup<'a, 'b> {
             xref: context.xref,
             nesting_depth: context.nesting_depth(),
             charged: Cell::new(false),
+            overprint: false,
+            blends: true,
         }
     }
 
@@ -161,7 +180,17 @@ const MAX_SCANNED_ENTRIES: usize = 16_384;
 /// tiling pattern or Type 3 font it reaches, names one. Bounded; a resource tree too large to
 /// read counts as blending.
 pub(crate) fn page_blends(page: &Page<'_>) -> bool {
-    let mut scan = BlendScan::default();
+    page_scan(page, names_a_blend_mode)
+}
+
+/// PdfCraft patch (72): whether anything `page` draws may set overprint (`/OP` or `/op` true),
+/// read as [`page_blends`] reads blend modes.
+pub(crate) fn page_overprints(page: &Page<'_>) -> bool {
+    page_scan(page, sets_overprint)
+}
+
+fn page_scan(page: &Page<'_>, wanted: fn(&Dict<'_>) -> bool) -> bool {
+    let mut scan = BlendScan { wanted: Some(wanted), ..BlendScan::default() };
     let mut level = Some(page.resources());
     while let Some(resources) = level {
         let found = scan.level(&resources.ext_g_states, [&resources.x_objects, &resources.patterns, &resources.fonts], 0);
@@ -187,6 +216,8 @@ struct BlendScan<'a> {
     seen: std::collections::HashSet<ObjectIdentifier>,
     resources: usize,
     entries: usize,
+    /// What a graphics state is looked for.
+    wanted: Option<fn(&Dict<'_>) -> bool>,
 }
 
 impl<'a> BlendScan<'a> {
@@ -199,7 +230,8 @@ impl<'a> BlendScan<'a> {
         }
         for key in states.keys() {
             self.count()?;
-            if states.get::<Dict<'_>>(key.deref()).is_some_and(|gs| names_a_blend_mode(&gs)) {
+            let wanted = self.wanted.unwrap_or(names_a_blend_mode);
+            if states.get::<Dict<'_>>(key.deref()).is_some_and(|gs| wanted(&gs)) {
                 return Some(true);
             }
         }
@@ -227,6 +259,11 @@ impl<'a> BlendScan<'a> {
         self.entries += 1;
         (self.entries <= MAX_SCANNED_ENTRIES).then_some(())
     }
+}
+
+/// PdfCraft patch (72): whether graphics state `gs` turns overprint on.
+fn sets_overprint(gs: &Dict<'_>) -> bool {
+    [OP, OP_NS].into_iter().any(|key| gs.get::<bool>(key).unwrap_or(false))
 }
 
 /// Whether graphics state `gs` sets `/BM` to anything but `Normal` (or its old name).
