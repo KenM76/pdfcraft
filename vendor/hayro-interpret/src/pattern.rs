@@ -88,6 +88,13 @@ impl<'a> Pattern<'a> {
         }
     }
 
+    /// PdfCraft patch (72): the overprint in effect when the pattern is painted.
+    pub(crate) fn set_overprint(&mut self, overprint: Option<crate::overprint::OverprintMode>) {
+        if let Self::Shading(p) = self {
+            p.overprint = overprint;
+        }
+    }
+
     pub(crate) fn set_transfer_function(&mut self, tf: ActiveTransferFunction) {
         if let Self::Shading(p) = self {
             p.transfer_function = Some(tf);
@@ -115,6 +122,8 @@ pub struct ShadingPattern {
     pub opacity: f32,
     /// An optional transfer function to apply to the shading's output colors.
     pub transfer_function: Option<ActiveTransferFunction>,
+    /// PdfCraft patch (72): the overprint mode when the shading is painted with overprint on.
+    pub overprint: Option<crate::overprint::OverprintMode>,
 }
 
 impl ShadingPattern {
@@ -142,6 +151,7 @@ impl ShadingPattern {
             opacity: 1.0,
             matrix,
             transfer_function: None,
+            overprint: None,
         })
     }
 }

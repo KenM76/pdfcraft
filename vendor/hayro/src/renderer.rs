@@ -1564,6 +1564,50 @@ impl Renderer {
         }
     }
 
+    /// PdfCraft patch (72): shading `s` on `path` as one-ink pass `pass` paints it: each sample's
+    /// ink as a gray (see `EncodedShadingPattern::sample_ink`), never a native gradient.
+    fn channel_shading_setup(
+        &mut self,
+        pass: InkPass,
+        s: &hayro_interpret::pattern::ShadingPattern,
+        path: &BezPath,
+        is_stroke: bool,
+    ) -> PaintSetup {
+        let mut bbox = self.shading_bbox(path, is_stroke);
+        let encoded = s.encode_within(Some(bbox.inflate(1.0, 1.0)));
+        for spot in encoded.spots() {
+            self.ink.register(&spot);
+        }
+        let Some(channel) = self.ink.channel(pass) else {
+            self.ink.unsupported = true;
+            return PaintSetup::Nothing;
+        };
+        let mut extend = peniko::Extend::Repeat;
+        if encoded.extent.is_some() {
+            let Some(area) = mesh_area(bbox, &encoded) else {
+                return PaintSetup::Nothing;
+            };
+            bbox = area;
+            extend = peniko::Extend::Pad;
+        }
+        let target = self.ink.target.clone();
+        let (image, width, height, transform, _) = render_texture(bbox, &encoded, |point| {
+            encoded.sample_ink(point, &channel, target.as_deref())
+        });
+        let pixmap = Pixmap::from_parts_with_opacity(image, width as u16, height as u16, true);
+        self.ctx.set_paint_transform(self.ctx.transform().inverse() * transform);
+        self.ctx.set_paint(PaintType::Image(Image {
+            image: ImageSource::Pixmap(Arc::new(pixmap)),
+            sampler: ImageSampler {
+                x_extend: extend,
+                y_extend: extend,
+                quality: ImageQuality::Medium,
+                alpha: 1.0,
+            },
+        }));
+        PaintSetup::Clip(s.shading.clip_path.clone())
+    }
+
     /// The paint `paint` draws on `path` with, set on the context (see [`PaintSetup`]).
     fn paint_setup(&mut self, paint: &Paint<'_>, path: &BezPath, is_stroke: bool) -> PaintSetup {
         let mut paint_transform = Affine::IDENTITY;
@@ -1574,6 +1618,13 @@ impl Renderer {
 
         // PdfCraft patch (27): an ink pass paints tints, and has none for a pattern.
         if let Some(pass) = self.ink.pass {
+            // PdfCraft patch (72): a one-ink pass samples a shading as its ink.
+            if pass.is_channel()
+                && let Paint::Pattern(p) = paint
+                && let Pattern::Shading(s) = p.as_ref()
+            {
+                return self.channel_shading_setup(pass, s, path, is_stroke);
+            }
             let color = match paint {
                 Paint::Color(c) => self.ink.paint(pass, c),
                 Paint::Pattern(_) => {
@@ -2587,6 +2638,15 @@ fn render_shading_texture(
     path_bbox: Rect,
     shading_pattern: &EncodedShadingPattern,
 ) -> (Vec<PremulRgba8>, u32, u32, Affine, bool) {
+    render_texture(path_bbox, shading_pattern, |point| shading_pattern.sample(point))
+}
+
+/// `shading_pattern` sampled by `sample` over `path_bbox`, a pixel at a time.
+fn render_texture(
+    path_bbox: Rect,
+    shading_pattern: &EncodedShadingPattern,
+    sample: impl Fn(Point) -> [f32; 4],
+) -> (Vec<PremulRgba8>, u32, u32, Affine, bool) {
     let base_width = (path_bbox.width() as f32).max(1.0);
     let base_height = (path_bbox.height() as f32).max(1.0);
 
@@ -2605,7 +2665,7 @@ fn render_shading_texture(
         let mut point = start_point;
 
         for pixel in row {
-            let sample = shading_pattern.sample(point);
+            let sample = sample(point);
             *pixel = AlphaColor::<Srgb>::new(sample).premultiply().to_rgba8();
             may_have_transparency |= pixel.a != 255;
 

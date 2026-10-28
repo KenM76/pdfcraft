@@ -992,6 +992,11 @@ fn interpret_window<'a>(
                             matrix: Affine::IDENTITY,
                             opacity: context.get().graphics_state.non_stroke_alpha,
                             transfer_function: transfer_function.clone(),
+                            overprint: context
+                                .get()
+                                .graphics_state
+                                .fill_overprint
+                                .then_some(context.get().graphics_state.overprint_mode),
                         })
                     })
                 {

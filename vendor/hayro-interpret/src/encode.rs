@@ -15,6 +15,10 @@ pub struct EncodedShadingPattern {
     pub base_transform: Affine,
     pub(crate) color_space: ColorSpace,
     pub(crate) background_color: AlphaColor,
+    /// PdfCraft patch (72): the `/Background` colour's components.
+    background: Option<ColorComponents>,
+    /// PdfCraft patch (72): the overprint the shading is painted with.
+    overprint: Option<crate::overprint::OverprintMode>,
     pub(crate) shading_type: EncodedShadingType,
     pub(crate) opacity: f32,
     pub(crate) transfer_function: Option<ActiveTransferFunction>,
@@ -28,6 +32,53 @@ pub struct EncodedShadingPattern {
 }
 
 impl EncodedShadingPattern {
+    /// PdfCraft patch (72): the spot inks the shading's colour space names.
+    pub fn spots(&self) -> Vec<crate::overprint::Spot> {
+        crate::overprint::spots_of(&self.color_space).into_vec()
+    }
+
+    /// PdfCraft patch (72): the shading at `pos` as one ink, under its overprint setting: a
+    /// gray of `1 − tint`, transparent where the shading keeps the ink (or paints nothing).
+    /// `target` converts colours without colorants of their own to process tints.
+    pub fn sample_ink(
+        &self,
+        pos: Point,
+        channel: &crate::overprint::Channel,
+        target: Option<&crate::OutputIntent>,
+    ) -> [f32; 4] {
+        let components = match self.shading_type.eval_components(pos) {
+            Sampled::Color(c) => c,
+            Sampled::Background => match &self.background {
+                Some(b) => b.clone(),
+                None => return [0.0; 4],
+            },
+            Sampled::Nothing => return [0.0; 4],
+        };
+        let space = &self.color_space;
+        let process = || {
+            crate::color::space_ink_tints(
+                space,
+                &components,
+                false,
+                target.map(|t| (t, crate::color::RenderingIntent::default())),
+            )
+        };
+        let Some(paint) = crate::overprint::ink_paint(space, &components, self.overprint, process) else {
+            return [0.0; 4];
+        };
+        let ink = match channel {
+            crate::overprint::Channel::Process(i) => paint.process.get(*i).copied(),
+            crate::overprint::Channel::Spot(name) => Some(paint.spot(name)),
+        };
+        match ink {
+            Some(crate::overprint::Ink::Paint(t)) => {
+                let g = 1.0 - t.clamp(0.0, 1.0);
+                [g, g, g, self.opacity.clamp(0.0, 1.0)]
+            }
+            _ => [0.0; 4],
+        }
+    }
+
     /// Sample the shading at the given position.
     #[inline]
     pub fn sample(&self, pos: Point) -> [f32; 4] {
@@ -168,6 +219,8 @@ impl ShadingPattern {
             .unwrap_or(AlphaColor::TRANSPARENT);
 
         EncodedShadingPattern {
+            background: self.shading.background.clone(),
+            overprint: self.overprint,
             color_space,
             background_color,
             shading_type,
@@ -434,6 +487,13 @@ pub(crate) enum EncodedShadingType {
     Dummy,
 }
 
+/// PdfCraft patch (72): what a shading has at one position, before conversion to RGB.
+pub(crate) enum Sampled {
+    Color(ColorComponents),
+    Background,
+    Nothing,
+}
+
 impl EncodedShadingType {
     pub(crate) fn eval(
         &self,
@@ -441,14 +501,24 @@ impl EncodedShadingType {
         bg_color: AlphaColor,
         color_space: &ColorSpace,
     ) -> Option<AlphaColor> {
+        match self.eval_components(pos) {
+            Sampled::Color(c) => Some(color_space.to_rgba(&c, 1.0, false)),
+            Sampled::Background => Some(bg_color),
+            Sampled::Nothing => Some(AlphaColor::TRANSPARENT),
+        }
+    }
+
+    /// The shading's colour components at `pos`.
+    pub(crate) fn eval_components(&self, pos: Point) -> Sampled {
         match self {
             Self::FunctionBased { domain, function } => {
                 if !domain.contains(pos) {
-                    Some(bg_color)
+                    Sampled::Background
                 } else {
-                    let out = function.eval(&smallvec![pos.x as f32, pos.y as f32])?;
                     // TODO: Clamp out-of-range values.
-                    Some(color_space.to_rgba(&out, 1.0, false))
+                    function
+                        .eval(&smallvec![pos.x as f32, pos.y as f32])
+                        .map_or(Sampled::Nothing, Sampled::Color)
                 }
             }
             Self::RadialAxial {
@@ -467,44 +537,43 @@ impl EncodedShadingType {
                 };
 
                 if t == f32::MIN {
-                    return Some(bg_color);
+                    return Sampled::Background;
                 }
 
                 if t < 0.0 {
                     if extend[0] {
                         t = 0.0;
                     } else {
-                        return Some(bg_color);
+                        return Sampled::Background;
                     }
                 } else if t > 1.0 {
                     if extend[1] {
                         t = 1.0;
                     } else {
-                        return Some(bg_color);
+                        return Sampled::Background;
                     }
                 }
 
                 let t = t0 + (t1 - t0) * t;
 
-                let val = function.eval(&smallvec![t])?;
-
-                Some(color_space.to_rgba(&val, 1.0, false))
+                function.eval(&smallvec![t]).map_or(Sampled::Nothing, Sampled::Color)
             }
             Self::Sampled { samples, function } => {
                 let sample_point = (pos.x as u16, pos.y as u16);
 
                 if let Some(color) = samples.get(&sample_point) {
                     if let Some(function) = function {
-                        let val = function.eval(&color.to_smallvec())?;
-                        Some(color_space.to_rgba(&val, 1.0, false))
+                        function
+                            .eval(&color.to_smallvec())
+                            .map_or(Sampled::Nothing, Sampled::Color)
                     } else {
-                        Some(color_space.to_rgba(color, 1.0, false))
+                        Sampled::Color(color.clone())
                     }
                 } else {
-                    Some(bg_color)
+                    Sampled::Background
                 }
             }
-            Self::Dummy => Some(AlphaColor::TRANSPARENT),
+            Self::Dummy => Sampled::Nothing,
         }
     }
 }

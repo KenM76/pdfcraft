@@ -1545,7 +1545,7 @@ impl Color {
 /// `target`, three-component ICCBased colours convert through its profile under its intent,
 /// the way a colour-managed device prints them; `DeviceRGB` is left uncalibrated. `None` for
 /// anything else.
-fn space_ink_tints(
+pub(crate) fn space_ink_tints(
     space: &ColorSpace,
     c: &[f32],
     nested: bool,
