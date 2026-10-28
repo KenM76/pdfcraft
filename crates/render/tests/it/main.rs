@@ -9,6 +9,7 @@ mod named_form_properties;
 mod nonseparable_gray;
 mod open_type_cff_simple_font;
 mod output_intent_icc;
+mod overprint_ink_passes;
 mod search;
 mod separation_all;
 mod stray_q_in_a_form;
