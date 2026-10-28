@@ -440,6 +440,16 @@ pub(crate) fn draw_image_xobject<'a, 'b>(
     } else {
         let mut raster = x_object.clone();
         raster.overprint = context.get().graphics_state.fill_overprint;
+        // PdfCraft patch (73): the image's own `/Intent`, else the graphics state's.
+        let intent = raster
+            .stream
+            .dict()
+            .get::<Name<'_>>(INTENT)
+            .map_or(context.get().graphics_state.rendering_intent, |n| {
+                crate::color::RenderingIntent::from_name(n.deref())
+            });
+        raster.proof = crate::OutputIntent::of(context.xref, &context.interpreter_cache.object_cache)
+            .map(|t| (t, intent));
         Image::Raster(RasterImage(raster))
     };
 
@@ -487,6 +497,9 @@ pub(crate) struct ImageXObject<'a> {
     default_space: Option<u128>,
     /// PdfCraft patch (72): whether the image is painted with fill overprint on.
     pub(crate) overprint: bool,
+    /// PdfCraft patch (73): the output intent an ICC-based image is shown through, and the
+    /// rendering intent it is converted under.
+    pub(crate) proof: Option<crate::color::Proof>,
 }
 
 impl<'a> ImageXObject<'a> {
@@ -567,6 +580,7 @@ impl<'a> ImageXObject<'a> {
             is_stencil_mask,
             default_space,
             overprint: false,
+            proof: None,
         })
     }
 
@@ -632,6 +646,8 @@ impl<'a> ImageXObject<'a> {
             interpolate: self.interpolate,
             // PdfCraft patch (38): the same image drawn in a default colour space or without one.
             default_space: self.default_space,
+            // PdfCraft patch (73): shown through an output intent, under which intent.
+            proof: self.proof.as_ref().map(|(_, intent)| *intent),
             // PdfCraft patch (32): see `decode_reads_target`.
             target: if self.decode_reads_target() {
                 target_dimension
@@ -859,6 +875,11 @@ fn decode_raster(
 ) -> Option<DecodedRaster> {
     let mut ctx = decode_context(obj, target_dimension)?;
     let mut height = ctx.height;
+    if let Some((target, intent)) = &obj.proof
+        && let Some(space) = ctx.color_space.proofed(target, *intent)
+    {
+        ctx.color_space = space;
+    }
 
     let is_default_decode = ctx.decode_arr
         == ctx

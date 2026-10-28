@@ -290,6 +290,27 @@ impl ColorSpaceType {
 pub struct ColorSpace(Arc<ColorSpaceType>);
 
 impl ColorSpace {
+    /// PdfCraft patch (73): this space as shown through output intent `target` under `intent`
+    /// (ISO 32000-2 §14.11.5): an ICC-based RGB or CMYK space, or an indexed one over it,
+    /// converts into the intent's CMYK first. `None` for any other space.
+    pub(crate) fn proofed(&self, target: &Arc<OutputIntent>, intent: RenderingIntent) -> Option<Self> {
+        match self.0.as_ref() {
+            ColorSpaceType::ICCBased(icc) => {
+                let icc = icc.proofed((target.clone(), intent))?;
+                Some(Self(Arc::new(ColorSpaceType::ICCBased(icc))))
+            }
+            ColorSpaceType::Indexed(i) => {
+                let base = i.base.proofed(target, intent)?;
+                Some(Self(Arc::new(ColorSpaceType::Indexed(Indexed {
+                    values: i.values.clone(),
+                    hival: i.hival,
+                    base: Box::new(base),
+                }))))
+            }
+            _ => None,
+        }
+    }
+
     /// PdfCraft patch (72): what kind of space this is.
     pub(crate) fn kind(&self) -> &ColorSpaceType {
         &self.0
@@ -1241,8 +1262,13 @@ struct ICCColorRepr {
     transform_f32: OnceLock<Arc<TransformF32Executor>>,
 }
 
+/// PdfCraft patch (73): an output intent and the rendering intent a colour is converted into it
+/// under, before it is shown.
+pub(crate) type Proof = (Arc<OutputIntent>, RenderingIntent);
+
+/// The colours of an ICC profile; with a [`Proof`], shown through the output intent (patch 73).
 #[derive(Clone)]
-pub(crate) struct ICCProfile(Arc<ICCColorRepr>);
+pub(crate) struct ICCProfile(Arc<ICCColorRepr>, Option<Proof>);
 
 impl Debug for ICCProfile {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
@@ -1293,15 +1319,49 @@ impl ICCProfile {
             )
             .ok()?;
 
-        Some(Self(Arc::new(ICCColorRepr {
-            src_profile,
-            src_layout,
-            number_components,
-            is_srgb,
-            is_lab,
-            transform_u8,
-            transform_f32: OnceLock::new(),
-        })))
+        Some(Self(
+            Arc::new(ICCColorRepr {
+                src_profile,
+                src_layout,
+                number_components,
+                is_srgb,
+                is_lab,
+                transform_u8,
+                transform_f32: OnceLock::new(),
+            }),
+            None,
+        ))
+    }
+
+    /// PdfCraft patch (73): the layout the profile's colours are read in.
+    pub(crate) fn layout(&self) -> Layout {
+        self.0.src_layout
+    }
+
+    /// PdfCraft patch (73): how many components a colour has.
+    pub(crate) fn number_components(&self) -> usize {
+        self.0.number_components
+    }
+
+    /// PdfCraft patch (73): this profile shown through `proof`; `None` for a profile that isn't
+    /// an RGB or CMYK one.
+    fn proofed(&self, proof: Proof) -> Option<Self> {
+        (!self.is_lab() && matches!(self.0.number_components, 3 | 4)).then(|| Self(self.0.clone(), Some(proof)))
+    }
+
+    /// PdfCraft patch (73): `input` through the output intent, then from its CMYK to sRGB as a
+    /// `DeviceCMYK` colour is shown. A chunk at a time, so the buffers stay small.
+    fn convert_proofed(&self, (target, intent): &Proof, input: &[f32], output: &mut [u8]) -> Option<()> {
+        const CHUNK: usize = 1 << 16;
+        let n = self.0.number_components;
+        let plain = Self(self.0.clone(), None);
+        for (src, dst) in input.chunks(CHUNK * n).zip(output.chunks_mut(CHUNK * 3)) {
+            let ink = target.icc_to_ink(&plain, *intent, src)?;
+            let cmyk: Vec<u8> = ink.iter().copied().map(f32_to_u8).collect();
+            let len = cmyk.len() / 4 * 3;
+            cmyk_to_srgb8(&cmyk, dst.get_mut(..len)?)?;
+        }
+        Some(())
     }
 
     /// PdfCraft patch (71): whether `other` is this very profile.
@@ -1349,6 +1409,9 @@ impl ICCProfile {
 
 impl ToRgb for ICCProfile {
     fn convert_f32(&self, input: &[f32], output: &mut [u8], _: bool) -> Option<()> {
+        if let Some(proof) = &self.1 {
+            return self.convert_proofed(proof, input, output);
+        }
         let mut temp = vec![0.0_f32; output.len()];
 
         if self.is_lab() {
@@ -1380,6 +1443,10 @@ impl ToRgb for ICCProfile {
     }
 
     fn convert_u8(&self, input: &[u8], output: &mut [u8]) -> Option<()> {
+        if let Some(proof) = &self.1 {
+            let input: Vec<f32> = input.iter().map(|v| f32::from(*v) / 255.0).collect();
+            return self.convert_proofed(proof, &input, output);
+        }
         if self.is_srgb() {
             output.copy_from_slice(input);
         } else {
@@ -1426,10 +1493,12 @@ pub struct Color {
     intent: RenderingIntent,
     /// PdfCraft patch (72): the overprint mode when overprint is on for this paint.
     overprint: Option<OverprintMode>,
+    /// PdfCraft patch (73): the output intent an ICC-based colour is shown through.
+    proof: Option<Arc<OutputIntent>>,
 }
 
 /// PdfCraft patch (71): a rendering intent (ISO 32000-2 §8.6.5.8).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum RenderingIntent {
     /// `AbsoluteColorimetric`.
     AbsoluteColorimetric,
@@ -1477,7 +1546,15 @@ impl Color {
             opacity,
             intent: RenderingIntent::default(),
             overprint: None,
+            proof: None,
         }
+    }
+
+    /// PdfCraft patch (73): this colour, shown through output intent `target` when its space is
+    /// ICC-based.
+    pub(crate) fn with_proof(mut self, target: Option<Arc<OutputIntent>>) -> Self {
+        self.proof = target;
+        self
     }
 
     /// PdfCraft patch (71): the same colour, painted under rendering intent `intent`.
@@ -1504,6 +1581,12 @@ impl Color {
 
     /// Return the color as an RGBA color.
     pub fn to_rgba(&self) -> AlphaColor {
+        // PdfCraft patch (73): an ICC-based colour on a page with a CMYK output intent.
+        if let Some(target) = &self.proof
+            && let Some(space) = self.color_space.proofed(target, self.intent)
+        {
+            return space.to_rgba(&self.components, self.opacity, false);
+        }
         self.color_space
             .to_rgba(&self.components, self.opacity, false)
     }
@@ -1528,6 +1611,7 @@ impl Color {
             opacity: c[3],
             intent: RenderingIntent::default(),
             overprint: None,
+            proof: None,
         }
     }
 }
@@ -1559,9 +1643,11 @@ pub(crate) fn space_ink_tints(
     };
     match space.0.as_ref() {
         ColorSpaceType::DeviceCmyk => Some([get(0), get(1), get(2), get(3)]),
-        ColorSpaceType::ICCBased(icc) if icc.0.number_components == 4 => {
-            Some([get(0), get(1), get(2), get(3)])
-        }
+        // PdfCraft patch (73): a CMYK profile's colour is converted into the output intent's.
+        ColorSpaceType::ICCBased(icc) if icc.0.number_components == 4 => target
+            .and_then(|(t, intent)| t.icc_to_ink(icc, intent, &[get(0), get(1), get(2), get(3)]))
+            .and_then(|v| Some([*v.first()?, *v.get(1)?, *v.get(2)?, *v.get(3)?]))
+            .or(Some([get(0), get(1), get(2), get(3)])),
         ColorSpaceType::DeviceGray => Some([0.0, 0.0, 0.0, 1.0 - get(0)]),
         ColorSpaceType::ICCBased(icc) if icc.0.number_components == 1 => {
             Some([0.0, 0.0, 0.0, 1.0 - get(0)])

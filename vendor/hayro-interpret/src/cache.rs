@@ -106,6 +106,9 @@ pub(crate) struct DecodedImageKey {
     pub(crate) is_stencil_mask: bool,
     pub(crate) interpolate: bool,
     pub(crate) default_space: Option<u128>,
+    /// PdfCraft patch (73): the rendering intent an image shown through an output intent is
+    /// converted under.
+    pub(crate) proof: Option<crate::color::RenderingIntent>,
     pub(crate) target: Option<(u32, u32)>,
     pub(crate) preview: bool,
 }

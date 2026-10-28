@@ -36,7 +36,36 @@ impl Source {
 /// built into it so far.
 pub struct OutputIntent {
     dest: ColorProfile,
-    transforms: Mutex<Vec<(Source, RenderingIntent, Arc<TransformF32Executor>)>>,
+    transforms: Mutex<Vec<(Source, RenderingIntent, Option<Xform>)>>,
+}
+
+/// A transform into the destination profile: direct, or through a wide-gamut RGB space when
+/// moxcms can't join the two profiles (a CMYK source into a CMYK destination).
+#[derive(Clone)]
+enum Xform {
+    Direct(Arc<TransformF32Executor>),
+    /// Source to ProPhoto RGB, then on into the destination.
+    ViaPcs(Arc<TransformF32Executor>, Arc<TransformF32Executor>),
+}
+
+impl Xform {
+    fn run(&self, input: &[f32], out: &mut [f32]) -> Option<()> {
+        match self {
+            Self::Direct(t) => t.transform(input, out).ok(),
+            Self::ViaPcs(to_pcs, from_pcs) => {
+                let n = out.len() / 4;
+                let mut pcs = vec![0.0f32; n.checked_mul(3)?];
+                to_pcs.transform(input, &mut pcs).ok()?;
+                from_pcs.transform(&pcs, out).ok()
+            }
+        }
+    }
+}
+
+impl std::fmt::Debug for OutputIntent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("OutputIntent {..}")
+    }
 }
 
 impl OutputIntent {
@@ -73,40 +102,64 @@ impl OutputIntent {
         self.to_ink(&Source::Lab, intent, pcs_xyz(lab))
     }
 
+    /// PdfCraft patch (73): `input`, colours of `src`'s components each, as ink tints of the
+    /// destination profile under `intent`, four a colour. `None` when no transform can be
+    /// built or `input` isn't whole colours.
+    pub(crate) fn icc_to_ink(&self, src: &ICCProfile, intent: RenderingIntent, input: &[f32]) -> Option<Vec<f32>> {
+        let n = src.number_components();
+        if n == 0 || input.len() % n != 0 {
+            return None;
+        }
+        let transform = self.transform(&Source::Icc(src.clone()), intent)?;
+        let clean: Vec<f32> = input.iter().map(|v| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 }).collect();
+        let mut out = vec![0.0f32; (input.len() / n).checked_mul(4)?];
+        transform.run(&clean, &mut out)?;
+        Some(out.into_iter().map(|v| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 }).collect())
+    }
+
     fn to_ink(&self, src: &Source, intent: RenderingIntent, rgb: [f32; 3]) -> Option<[f32; 4]> {
         let transform = self.transform(src, intent)?;
         let input = rgb.map(|v| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 });
         let mut out = [0.0f32; 4];
-        transform.transform(&input, &mut out).ok()?;
+        transform.run(&input, &mut out)?;
         Some(out.map(|v| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 }))
     }
 
-    fn transform(&self, src: &Source, intent: RenderingIntent) -> Option<Arc<TransformF32Executor>> {
+    /// The transform from `src` under `intent`, built once; a failure is remembered too.
+    fn transform(&self, src: &Source, intent: RenderingIntent) -> Option<Xform> {
         // A poisoned lock only means another thread panicked mid-push; the list is still whole.
         let mut transforms = self.transforms.lock().unwrap_or_else(|e| e.into_inner());
         if let Some((_, _, t)) = transforms.iter().find(|(p, i, _)| p.same(src) && *i == intent) {
-            return Some(t.clone());
+            return t.clone();
         }
         let options = TransformOptions {
             rendering_intent: intent.to_moxcms(),
             ..TransformOptions::default()
         };
         let lab;
-        let profile = match src {
-            Source::Icc(icc) => icc.src_profile(),
+        let (profile, layout) = match src {
+            Source::Icc(icc) => (icc.src_profile(), icc.layout()),
             Source::Lab => {
                 lab = ColorProfile::new_lab();
-                &lab
+                (&lab, Layout::Rgb)
             }
         };
-        let transform = profile
-            .create_transform_f32(Layout::Rgb, &self.dest, Layout::Rgba, options)
-            .ok()?;
+        let transform = match profile.create_transform_f32(layout, &self.dest, Layout::Rgba, options) {
+            Ok(t) => Some(Xform::Direct(t)),
+            Err(_) => {
+                // moxcms joins a CMYK source to an RGB destination only; ProPhoto's gamut holds
+                // every print gamut, and its matrix has no intent of its own.
+                let pcs = ColorProfile::new_pro_photo_rgb();
+                let to_pcs = profile.create_transform_f32(layout, &pcs, Layout::Rgb, options).ok();
+                let from_pcs = pcs.create_transform_f32(Layout::Rgb, &self.dest, Layout::Rgba, options).ok();
+                to_pcs.zip(from_pcs).map(|(a, b)| Xform::ViaPcs(a, b))
+            }
+        };
         if transforms.len() >= MAX_TRANSFORMS {
             transforms.remove(0);
         }
         transforms.push((src.clone(), intent, transform.clone()));
-        Some(transform)
+        transform
     }
 }
 
