@@ -1061,6 +1061,11 @@ pub(crate) fn decode_ink(
     target_dimension: Option<(u32, u32)>,
 ) -> Option<DecodedRaster> {
     let mut ctx = decode_context(obj, target_dimension)?;
+    // PdfCraft patch (75): an image the output intent proofs takes its inks from it; patch
+    // (80): any of the four, however few components the image has.
+    if obj.proof.is_some() && ctx.color_space.proofs() {
+        return decode_proofed_inks(obj, &[component], target_dimension);
+    }
     let mut height = ctx.height;
     let n = usize::from(ctx.color_space.num_components());
     let width_of = match ctx.color_space.kind() {
@@ -1073,10 +1078,6 @@ pub(crate) fn decode_ink(
     let components = get_components(&ctx.decoded.data, ctx.width, height, &ctx.color_space, ctx.bits_per_component)?;
     let mut samples = apply_decode_array(&components, &ctx.color_space, ctx.bits_per_component, &ctx.decode_arr)?;
     fix_image_length(&mut samples, ctx.width, &mut height, 0.0, &ctx.color_space)?;
-    // PdfCraft patch (75): an image the output intent proofs takes its inks from it.
-    if obj.proof.is_some() && ctx.color_space.proofs() {
-        return decode_proofed_inks(obj, &[component], target_dimension);
-    }
     // An indexed sample's component is its base colour's.
     let indexed = match ctx.color_space.kind() {
         crate::color::ColorSpaceType::Indexed(i) => Some(i),

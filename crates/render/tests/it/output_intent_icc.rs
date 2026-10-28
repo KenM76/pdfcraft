@@ -102,12 +102,15 @@ fn render_in(profile: Option<Vec<u8>>, group: &str, states: &str, reference: &st
     let objects: Vec<Vec<u8>> = vec![
         format!("<< /Type /Catalog /Pages 2 0 R {intents} >>").into_bytes(),
         b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
-        format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Contents 4 0 R {group} /Resources << /ExtGState << {states} >> /ColorSpace << /CS0 [/ICCBased 5 0 R] /L [/Lab << /WhitePoint [0.9642 1 0.8249] >>] >> /XObject << /Im0 6 0 R /Im1 8 0 R >> >> >>").into_bytes(),
+        format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Contents 4 0 R {group} /Resources << /ExtGState << {states} >> /ColorSpace << /CS0 [/ICCBased 5 0 R] /L [/Lab << /WhitePoint [0.9642 1 0.8249] >>] /CS2 [/ICCBased 9 0 R] >> /XObject << /Im0 6 0 R /Im1 8 0 R /Im2 10 0 R /Im3 11 0 R >> >> >>").into_bytes(),
         stream("", body.as_bytes()),
         stream("/N 3", &srgb_profile()),
         stream("/Type /XObject /Subtype /Image /Width 1 /Height 1 /BitsPerComponent 8 /ColorSpace [/ICCBased 5 0 R]", &[0, 0, 255]),
         stream("/N 4", &profile.unwrap_or_default()),
         stream("/Type /XObject /Subtype /Image /Width 1 /Height 1 /BitsPerComponent 8 /ColorSpace [/Indexed [/ICCBased 5 0 R] 0 <0000FF>]", &[0]),
+        stream("/N 1", &ColorProfile::new_gray_with_gamma(2.2).encode().unwrap()),
+        stream("/Type /XObject /Subtype /Image /Width 1 /Height 1 /BitsPerComponent 8 /ColorSpace [/ICCBased 9 0 R]", &[128]),
+        stream("/Type /XObject /Subtype /Image /Width 1 /Height 1 /BitsPerComponent 16 /ColorSpace [/ICCBased 9 0 R]", &[128, 0]),
     ];
     let mut bytes = b"%PDF-1.7\n".to_vec();
     let mut offsets = Vec::new();
@@ -220,4 +223,27 @@ fn in_a_blending_cmyk_page_group_a_lab_colour_prints_the_output_intents_ink() {
 #[test]
 fn in_an_overprinting_cmyk_page_group_a_lab_colour_prints_the_output_intents_ink() {
     assert_lab_prints_its_ink("/OP << /OP true /op true >>");
+}
+
+/// A gray `ICCBased` colour, painted or as an 8- or 16-bit image, deposits the ink the output
+/// intent gives it too (patch (80)), not black ink alone: a gray profile for black ink prints
+/// its shadows with all four.
+fn assert_gray_prints_green(states: &str) {
+    let [c, m, y, k] = GREEN;
+    let reference = format!("{c} {m} {y} {k} k 10 10 80 80 re f");
+    for content in ["/CS2 cs 0.5 sc 110 10 80 80 re f", "q 80 0 0 80 110 10 cm /Im2 Do Q", "q 80 0 0 80 110 10 cm /Im3 Do Q"] {
+        let page = render_in(Some(green_profile()), CMYK_GROUP, states, &reference, content);
+        let (reference, drawn) = (at(&page, 50, 50), at(&page, 150, 50));
+        assert!(close(drawn, reference), "{states} {content}: drawn {drawn:?}, reference {reference:?}");
+    }
+}
+
+#[test]
+fn in_a_blending_cmyk_page_group_a_gray_icc_colour_prints_the_output_intents_ink() {
+    assert_gray_prints_green("/BM << /BM /Multiply >>");
+}
+
+#[test]
+fn in_an_overprinting_cmyk_page_group_a_gray_icc_colour_prints_the_output_intents_ink() {
+    assert_gray_prints_green("/OP << /OP true /op true >>");
 }

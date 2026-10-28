@@ -292,7 +292,8 @@ pub struct ColorSpace(Arc<ColorSpaceType>);
 impl ColorSpace {
     /// PdfCraft patch (73): this space as shown through output intent `target` under `intent`
     /// (ISO 32000-2 §14.11.5): an ICC-based RGB or CMYK space, or an indexed one over it,
-    /// converts into the intent's CMYK first. `None` for any other space.
+    /// converts into the intent's CMYK first, as does a gray one (patch (80)). `None` for any
+    /// other space.
     pub(crate) fn proofed(&self, target: &Arc<OutputIntent>, intent: RenderingIntent) -> Option<Self> {
         match self.0.as_ref() {
             ColorSpaceType::ICCBased(icc) => {
@@ -315,7 +316,7 @@ impl ColorSpace {
     pub(crate) fn proofs(&self) -> bool {
         match self.0.as_ref() {
             ColorSpaceType::ICCBased(icc) => {
-                !icc.is_lab() && matches!(icc.0.number_components, 3 | 4)
+                !icc.is_lab() && matches!(icc.0.number_components, 1 | 3 | 4)
             }
             ColorSpaceType::Indexed(i) => i.base.proofs(),
             _ => false,
@@ -1411,9 +1412,9 @@ impl ICCProfile {
     }
 
     /// PdfCraft patch (73): this profile shown through `proof`; `None` for a profile that isn't
-    /// an RGB or CMYK one.
+    /// a gray (patch (80)), RGB or CMYK one.
     fn proofed(&self, proof: Proof) -> Option<Self> {
-        (!self.is_lab() && matches!(self.0.number_components, 3 | 4)).then(|| Self(self.0.clone(), Some(proof)))
+        (!self.is_lab() && matches!(self.0.number_components, 1 | 3 | 4)).then(|| Self(self.0.clone(), Some(proof)))
     }
 
     /// PdfCraft patch (73): `input` through the output intent, then from its CMYK to sRGB as a
@@ -1721,9 +1722,11 @@ pub(crate) fn space_ink_tints(
             .and_then(|v| Some([*v.first()?, *v.get(1)?, *v.get(2)?, *v.get(3)?]))
             .or(Some([get(0), get(1), get(2), get(3)])),
         ColorSpaceType::DeviceGray => Some([0.0, 0.0, 0.0, 1.0 - get(0)]),
-        ColorSpaceType::ICCBased(icc) if icc.0.number_components == 1 => {
-            Some([0.0, 0.0, 0.0, 1.0 - get(0)])
-        }
+        // PdfCraft patch (80): so is a gray profile's, which may print as more than black ink.
+        ColorSpaceType::ICCBased(icc) if icc.0.number_components == 1 => target
+            .and_then(|(t, intent)| t.icc_to_ink(icc, intent, &[get(0)]))
+            .and_then(|v| Some([*v.first()?, *v.get(1)?, *v.get(2)?, *v.get(3)?]))
+            .or(Some([0.0, 0.0, 0.0, 1.0 - get(0)])),
         ColorSpaceType::Lab(lab) => target
             .and_then(|(t, intent)| t.lab_to_ink(intent, lab.clamped([get_raw(0), get_raw(1), get_raw(2)])))
             .or_else(from_srgb),
