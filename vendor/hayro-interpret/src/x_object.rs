@@ -1026,15 +1026,30 @@ pub(crate) fn decode_ink(
     let mut ctx = decode_context(obj, target_dimension)?;
     let mut height = ctx.height;
     let n = usize::from(ctx.color_space.num_components());
-    if n == 0 || component >= n {
+    let width_of = match ctx.color_space.kind() {
+        crate::color::ColorSpaceType::Indexed(i) => usize::from(i.base().num_components()),
+        _ => n,
+    };
+    if n == 0 || component >= width_of {
         return None;
     }
     let components = get_components(&ctx.decoded.data, ctx.width, height, &ctx.color_space, ctx.bits_per_component)?;
     let mut samples = apply_decode_array(&components, &ctx.color_space, ctx.bits_per_component, &ctx.decode_arr)?;
     fix_image_length(&mut samples, ctx.width, &mut height, 0.0, &ctx.color_space)?;
+    // An indexed sample's component is its base colour's.
+    let indexed = match ctx.color_space.kind() {
+        crate::color::ColorSpaceType::Indexed(i) => Some(i),
+        _ => None,
+    };
     let data = samples
         .chunks_exact(n)
-        .map(|px| f32_to_u8(1.0 - px.get(component).copied().unwrap_or(0.0).clamp(0.0, 1.0)))
+        .map(|px| {
+            let tint = match indexed {
+                Some(i) => i.lookup(px.first().copied().unwrap_or(0.0)).and_then(|b| b.get(component).copied()),
+                None => px.get(component).copied(),
+            };
+            f32_to_u8(1.0 - tint.unwrap_or(0.0).clamp(0.0, 1.0))
+        })
         .collect();
     let image = ImageData::Luma(LumaData {
         data,

@@ -1049,6 +1049,20 @@ impl Indexed {
     }
 }
 
+impl Indexed {
+    /// PdfCraft patch (72): the base space the table's entries are in.
+    pub(crate) fn base(&self) -> &ColorSpace {
+        &self.base
+    }
+
+    /// PdfCraft patch (72): the base-space colour at index `index` (rounded, clamped to
+    /// `hival`).
+    pub(crate) fn lookup(&self, index: f32) -> Option<&[f32]> {
+        let index = if index.is_finite() { index.clamp(0.0, f32::from(self.hival)) } else { 0.0 };
+        self.values.get((index + 0.5) as usize).map(Vec::as_slice)
+    }
+}
+
 impl ToRgb for Indexed {
     fn convert_f32(&self, input: &[f32], output: &mut [u8], _: bool) -> Option<()> {
         let mut indexed = vec![0.0; input.len() * self.base.num_components() as usize];

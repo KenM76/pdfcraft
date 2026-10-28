@@ -1352,23 +1352,30 @@ impl Renderer {
             let i = u8::try_from(i).ok()?;
             passes.push(self.ink_pass(group, InkPass::Spot(i), offset, width, height, &mut spots)?);
         }
-        // A pass's tint is its premultiplied grey un-premultiplied and complemented.
-        let tint = |px: &PremulRgba8| -> f32 {
-            if px.a == 0 {
-                return 0.0;
-            }
-            1.0 - (f32::from(px.r) / f32::from(px.a)).min(1.0)
-        };
+        // A pass's ink is its premultiplied grey's distance below its coverage (no ink is
+        // white), taken over the group's coverage, the largest any pass reached: a pass whose
+        // paints cover less of a pixel than another's deposits proportionally less ink there.
+        let blank = PremulRgba8 { r: 0, g: 0, b: 0, a: 0 };
         let pixels = usize::from(width) * usize::from(height);
         let mut tints = Vec::with_capacity(pixels * 4);
         let mut coverage = vec![0u8; pixels];
+        let mut spot_tints = vec![0.0f32; pixels * met.len()];
         for (p, cover) in coverage.iter_mut().enumerate() {
-            for (n, pass) in passes.iter().enumerate() {
-                let px = pass.data().get(p).copied().unwrap_or(PremulRgba8 { r: 0, g: 0, b: 0, a: 0 });
-                if n < 4 {
-                    tints.push((tint(&px) * 255.0).round() as u8);
+            *cover = passes.iter().map(|pass| pass.data().get(p).map_or(0, |px| px.a)).max().unwrap_or(0);
+            let ink = |pass: &Pixmap| -> f32 {
+                let px = pass.data().get(p).copied().unwrap_or(blank);
+                if *cover == 0 {
+                    return 0.0;
                 }
-                *cover = (*cover).max(px.a);
+                (f32::from(px.a.saturating_sub(px.r)) / f32::from(*cover)).min(1.0)
+            };
+            for pass in passes.iter().take(4) {
+                tints.push((ink(pass) * 255.0).round() as u8);
+            }
+            for (j, pass) in passes.iter().skip(4).enumerate() {
+                if let Some(slot) = spot_tints.get_mut(p * met.len() + j) {
+                    *slot = ink(pass);
+                }
             }
         }
         let mut rgb = vec![0u8; pixels * 3];
@@ -1382,9 +1389,8 @@ impl Renderer {
             .enumerate()
         {
             let mut c = [rgb[0], rgb[1], rgb[2]].map(|v| f32::from(v) / 255.0);
-            for (spot, pass) in met.iter().zip(passes.iter().skip(4)) {
-                let px = pass.data().get(p).copied().unwrap_or(PremulRgba8 { r: 0, g: 0, b: 0, a: 0 });
-                let t = tint(&px);
+            for (j, spot) in met.iter().enumerate() {
+                let t = spot_tints.get(p * met.len() + j).copied().unwrap_or(0.0);
                 if t > 0.0 {
                     let s = spot.srgb(t);
                     c = [c[0] * s[0], c[1] * s[1], c[2] * s[2]];

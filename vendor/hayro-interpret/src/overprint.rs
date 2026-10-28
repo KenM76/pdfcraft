@@ -80,6 +80,11 @@ pub(crate) fn ink_paint(
     overprint: Option<OverprintMode>,
     process: impl Fn() -> Option<[f32; 4]>,
 ) -> Option<InkPaint> {
+    // PdfCraft patch (72): an indexed colour paints its base colour's inks.
+    if let ColorSpaceType::Indexed(i) = space.kind() {
+        let base = i.lookup(c.first().copied().unwrap_or(0.0))?;
+        return ink_paint(i.base(), base, overprint, process);
+    }
     let get = |i: usize| c.get(i).copied().unwrap_or(0.0).clamp(0.0, 1.0);
     let unnamed = if overprint.is_some() { Ink::Keep } else { Ink::Paint(0.0) };
     let mut paint = InkPaint {
@@ -160,6 +165,8 @@ pub(crate) fn channel_source(space: Option<&ColorSpace>, channel: &Channel, over
         names.iter().position(|n| *n == wanted).map_or(unnamed, ChannelSource::Component)
     };
     match space.map(ColorSpace::kind) {
+        // An indexed image's samples are base colours.
+        Some(ColorSpaceType::Indexed(i)) => channel_source(Some(i.base()), channel, overprint),
         Some(ColorSpaceType::DeviceCmyk) => match channel {
             Channel::Process(i) if *i < 4 => ChannelSource::Component(*i),
             _ => unnamed,
@@ -179,6 +186,9 @@ pub(crate) fn channel_source(space: Option<&ColorSpace>, channel: &Channel, over
 
 /// The spot inks `space` names, for an image or shading in it.
 pub(crate) fn spots_of(space: &ColorSpace) -> SmallVec<[Spot; 2]> {
+    if let ColorSpaceType::Indexed(i) = space.kind() {
+        return spots_of(i.base());
+    }
     let initial = space.initial_color();
     ink_paint(space, &initial, None, || Some([0.0; 4]))
         .map(|p| p.spots.into_iter().map(|(s, _)| s).collect())
