@@ -17,4 +17,5 @@ mod stray_q_in_a_form;
 mod stroke_degenerate_cubic;
 mod substitute_widths;
 mod tiling_cell_placement;
+mod type3_bitmap_glyph_minified;
 mod type3_text_clip;

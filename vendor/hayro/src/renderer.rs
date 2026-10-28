@@ -236,6 +236,70 @@ fn nearest_premultiplied_rgba(
     Some(out)
 }
 
+/// PdfCraft patch (77): `color` with `alpha` (opaque when `None`) shrunk to `target` by area
+/// averaging, as premultiplied RGBA. Each target pixel is the coverage-weighted mean of the source
+/// samples its footprint overlaps, so a stroke thinner than the reduction ratio stays visible
+/// as partial coverage instead of being dropped by point sampling.
+fn area_premultiplied_rgba(
+    color: &ImageData,
+    alpha: Option<&[u8]>,
+    source: (u32, u32),
+    target: (u32, u32),
+) -> Option<Vec<u8>> {
+    let (samples, channels) = match color {
+        ImageData::Luma(luma) => (luma.data.as_slice(), 1),
+        ImageData::Rgb(rgb) => (rgb.data.as_slice(), 3),
+    };
+    if source.0 == 0 || source.1 == 0 || target.0 == 0 || target.1 == 0 {
+        return None;
+    }
+    let spans = |src: u32, dst: u32| -> Vec<Vec<(usize, f32)>> {
+        let ratio = f64::from(src) / f64::from(dst);
+        (0..dst)
+            .map(|t| {
+                let (lo, hi) = (f64::from(t) * ratio, f64::from(t + 1) * ratio);
+                let first = lo.floor() as u32;
+                let last = (hi.ceil() as u32).min(src);
+                (first..last)
+                    .filter_map(|i| {
+                        let w = (hi.min(f64::from(i + 1)) - lo.max(f64::from(i))) / ratio;
+                        (w > 0.0).then_some((i as usize, w as f32))
+                    })
+                    .collect()
+            })
+            .collect()
+    };
+    let (xs, ys) = (spans(source.0, target.0), spans(source.1, target.1));
+    let mut out = image_buffer(image_byte_len(target.0, target.1, 4, MAX_IMAGE_PIXELS)?)?;
+    let width = source.0 as usize;
+    for row in &ys {
+        for col in &xs {
+            let mut acc = [0.0f32; 4];
+            for &(sy, wy) in row {
+                for &(sx, wx) in col {
+                    let si = sy.checked_mul(width)?.checked_add(sx)?;
+                    let [r, g, b] = match samples.get(si * channels..si * channels + channels)? {
+                        [v] => [*v; 3],
+                        [r, g, b] => [*r, *g, *b],
+                        _ => return None,
+                    };
+                    let a = match alpha {
+                        Some(alpha) => f32::from(*alpha.get(si)?) / 255.0,
+                        None => 1.0,
+                    };
+                    let w = wx * wy;
+                    acc[0] += w * a * f32::from(r);
+                    acc[1] += w * a * f32::from(g);
+                    acc[2] += w * a * f32::from(b);
+                    acc[3] += w * a * 255.0;
+                }
+            }
+            out.extend(acc.map(|v| v.round().clamp(0.0, 255.0) as u8));
+        }
+    }
+    Some(out)
+}
+
 /// PdfCraft patch: most pieces one dashed stroke may be cut into. Stroke expansion keeps every
 /// dash, so a pattern that is tiny next to its path asks for billions: a fuzzed `/D [[11] 0]` on
 /// a line from x = 92234775807 allocated over 5 GB, and `[0.000001] 0 d` on a 20 pt line over
@@ -829,7 +893,7 @@ impl Renderer {
             // Note that there is a circle between `draw_image` and `draw_image_with_alpha_mask`,
             // but `draw_image_with_alpha_mask` is only called if the dimensions or interpolate
             // values between alpha_data and rgb_data don't match, which they do here.
-            renderer.draw_image(rgb_data, Some(alpha_data));
+            renderer.draw_image(rgb_data, Some(alpha_data), false);
             renderer.ctx.flush();
             let mut resources = vello_cpu::Resources::default();
             renderer.ctx.render_to_pixmap(&mut resources, &mut mask_pix);
@@ -838,7 +902,7 @@ impl Renderer {
 
         self.ctx.push_mask_layer(mask);
         self.image_transparency_stack.push(true);
-        self.draw_image(image_data, None);
+        self.draw_image(image_data, None, false);
         self.image_transparency_stack.pop();
         self.ctx.pop_layer();
     }
@@ -1006,7 +1070,8 @@ impl Renderer {
         Some((target_width, target_height))
     }
 
-    fn draw_image(&mut self, image_data: ImageData, alpha_data: Option<LumaData>) {
+    /// `stencil` is an image mask painted in one colour (PdfCraft patch (77)).
+    fn draw_image(&mut self, image_data: ImageData, alpha_data: Option<LumaData>, stencil: bool) {
         let cur_transform = *self.ctx.transform();
         let (x_scale, y_scale) = {
             let (x, y) = x_y_advances(&cur_transform);
@@ -1107,7 +1172,21 @@ impl Renderer {
         // PdfCraft patch (#624): a minified image with a soft mask that is not interpolated is
         // nearest-sampled straight into premultiplied target RGBA. That skips the full-resolution
         // RGBA copy below and the premultiply pass after it.
+        // PdfCraft patch (77): an image mask shrunk inside a Type 3 glyph is a bitmap glyph (a TeX
+        // PK font at 300-600 dpi) drawn at screen size. Point sampling drops every stroke thinner
+        // than the reduction ratio, so it is area-averaged instead, then drawn bilinearly. A
+        // magnified or 1:1 glyph, and a colour image in a glyph, stay unsmoothed.
+        let glyph_minified = stencil && self.in_type3_glyph && requested_resize && !interpolate;
+        if glyph_minified {
+            quality = ImageQuality::Medium;
+        }
         let direct = match &alpha_data {
+            _ if needs_resize && glyph_minified => area_premultiplied_rgba(
+                &image_data,
+                alpha_data.as_ref().map(|a| a.data.as_slice()),
+                (source_width, source_height),
+                (new_width, new_height),
+            ),
             Some(alpha) if needs_resize && !interpolate => nearest_premultiplied_rgba(
                 &image_data,
                 &alpha.data,
@@ -1307,7 +1386,7 @@ impl Renderer {
             let (sx, sy) = image.scale_factors();
             transform *= Affine::scale_non_uniform(sx as f64, sy as f64);
             this.ctx.set_transform(transform);
-            this.draw_image(image, alpha);
+            this.draw_image(image, alpha, false);
         };
         match r.ink_source(&channel) {
             ChannelSource::Keep => {}
@@ -2089,7 +2168,7 @@ impl<'a> Device<'a> for Renderer {
                                     interpolate: stencil.interpolate,
                                     scale_factors: stencil.scale_factors,
                                 });
-                                self.draw_image(rgb_data, Some(stencil));
+                                self.draw_image(rgb_data, Some(stencil), true);
 
                                 if push_layer {
                                     self.ctx.pop_layer();
@@ -2150,7 +2229,7 @@ impl<'a> Device<'a> for Renderer {
                                     };
                                     let mut sub_pix = Pixmap::new(width, height);
                                     sub_renderer.ctx.set_transform(transform);
-                                    sub_renderer.draw_image(rgb_bytes, Some(stencil));
+                                    sub_renderer.draw_image(rgb_bytes, Some(stencil), true);
                                     sub_renderer.ctx.flush();
                                     let mut resources = vello_cpu::Resources::default();
                                     sub_renderer
@@ -2211,7 +2290,7 @@ impl<'a> Device<'a> for Renderer {
                             let (sx, sy) = image.scale_factors();
                             transform *= Affine::scale_non_uniform(sx as f64, sy as f64);
                             self.ctx.set_transform(transform);
-                            self.draw_image(image, alpha);
+                            self.draw_image(image, alpha, false);
                         },
                         Some((target_width, target_height)),
                     )
@@ -2235,7 +2314,7 @@ impl<'a> Device<'a> for Renderer {
                         };
                         transform *= Affine::scale_non_uniform(sx as f64, sy as f64);
                         self.ctx.set_transform(transform);
-                        self.draw_image(image, alpha);
+                        self.draw_image(image, alpha, false);
                     },
                     Some((target_width, target_height)),
                 );
