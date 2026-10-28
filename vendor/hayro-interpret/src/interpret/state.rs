@@ -1,5 +1,5 @@
 use crate::StrokeProps;
-use crate::color::{AlphaColor, ColorComponents, ColorSpace};
+use crate::color::{RenderingIntent, AlphaColor, ColorComponents, ColorSpace};
 use crate::context::Context;
 use crate::convert::{convert_line_cap, convert_line_join};
 use crate::font::{Font, UNITS_PER_EM};
@@ -97,6 +97,7 @@ impl<'a> State<'a> {
             color_space: self.graphics_state.stroke_cs.clone(),
             pattern: self.graphics_state.stroke_pattern.clone(),
             transfer_function: self.graphics_state.transfer_function.clone(),
+            intent: self.graphics_state.rendering_intent,
         }
     }
 
@@ -107,6 +108,7 @@ impl<'a> State<'a> {
             color_space: self.graphics_state.none_stroke_cs.clone(),
             pattern: self.graphics_state.non_stroke_pattern.clone(),
             transfer_function: self.graphics_state.transfer_function.clone(),
+            intent: self.graphics_state.rendering_intent,
         }
     }
 }
@@ -269,6 +271,8 @@ pub(crate) struct GraphicsState<'a> {
     pub(crate) soft_mask: Option<SoftMask<'a>>,
     pub(crate) transfer_function: Option<ActiveTransferFunction>,
     pub(crate) blend_mode: BlendMode,
+    /// PdfCraft patch (71): set by `ri` and an ExtGState's `/RI`.
+    pub(crate) rendering_intent: RenderingIntent,
 }
 
 impl Default for GraphicsState<'_> {
@@ -286,6 +290,7 @@ impl Default for GraphicsState<'_> {
             soft_mask: None,
             transfer_function: None,
             blend_mode: BlendMode::default(),
+            rendering_intent: RenderingIntent::default(),
         }
     }
 }
@@ -296,6 +301,7 @@ pub(crate) struct PaintData<'a> {
     pub(crate) color_space: ColorSpace,
     pub(crate) pattern: Option<Pattern<'a>>,
     pub(crate) transfer_function: Option<ActiveTransferFunction>,
+    pub(crate) intent: RenderingIntent,
 }
 
 pub(crate) fn handle_gs<'a>(
@@ -407,6 +413,10 @@ pub(crate) fn handle_gs_single<'a>(
                 // kurbo apparently cannot properly deal with offsets that are exactly 0.
                 .map(|n| if n == 0.0 { 0.01 } else { n })
                 .collect();
+        }
+        "RI" => {
+            let name = dict.get::<Name<'_>>(key)?;
+            context.get_mut().graphics_state.rendering_intent = RenderingIntent::from_name(name.deref());
         }
         "Type" => {}
         _ => {}

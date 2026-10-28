@@ -175,7 +175,8 @@ pub(crate) fn get_paint<'a>(context: &Context<'a>, is_stroke: bool) -> Paint<'a>
             Color::new(ColorSpace::device_gray(), smallvec![gray], data.alpha)
         } else {
             Color::new(data.color_space, data.color, data.alpha)
-        };
+        }
+        .with_intent(data.intent);
 
         if let Some(tf) = &data.transfer_function {
             Paint::Color(Color::from_rgba(tf.apply(&color.to_rgba())))

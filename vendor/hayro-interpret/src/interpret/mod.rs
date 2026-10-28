@@ -699,8 +699,10 @@ fn interpret_window<'a>(
                         .map(|n| if n == 0.0 { 0.01 } else { n })
                         .collect();
             }
-            TypedInstruction::RenderingIntent(_) => {
-                // Ignore for now.
+            TypedInstruction::RenderingIntent(ri) => {
+                // PdfCraft patch (71).
+                context.get_mut().graphics_state.rendering_intent =
+                    crate::color::RenderingIntent::from_name(std::ops::Deref::deref(ri.0));
             }
             TypedInstruction::NonStrokeColorNamed(n) => {
                 context.get_mut().graphics_state.non_stroke_color =

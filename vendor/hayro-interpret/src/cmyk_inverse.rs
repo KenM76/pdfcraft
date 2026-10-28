@@ -62,6 +62,53 @@ thread_local! {
     static LAST: Cell<Option<([u32; 3], [f32; 4])>> = const { Cell::new(None) };
 }
 
+/// Grid points per channel of [`INK_GRID`].
+const GRID: usize = 33;
+
+/// PdfCraft patch (70): [`srgb_to_cmyk`] solved once at `GRID`³ evenly spaced sRGB colours, so
+/// an image's pixels are inked by interpolation instead of a solve each. `None` entries are
+/// colours the solve failed for.
+static INK_GRID: LazyLock<Vec<Option<[f32; 4]>>> = LazyLock::new(|| {
+    let level = |i: usize| i as f32 / (GRID - 1) as f32;
+    let mut grid = Vec::with_capacity(GRID * GRID * GRID);
+    for r in 0..GRID {
+        for g in 0..GRID {
+            for b in 0..GRID {
+                grid.push(solve_ink([level(r), level(g), level(b)]));
+            }
+        }
+    }
+    grid
+});
+
+/// PdfCraft patch (70): the process ink for an 8-bit sRGB pixel, trilinearly interpolated
+/// from [`INK_GRID`]; solved directly when a surrounding grid point has no ink.
+pub(crate) fn srgb8_to_cmyk(rgb: [u8; 3]) -> Option<[f32; 4]> {
+    let cells = (GRID - 1) as f32;
+    let pos = rgb.map(|v| f32::from(v) * cells / 255.0);
+    // `pos` is in 0..=cells, so the floor is a valid cell index once capped at the last cell.
+    let base = pos.map(|p| (p.floor() as usize).min(GRID - 2));
+    let frac: [f32; 3] = std::array::from_fn(|i| pos[i] - base[i] as f32);
+    let mut ink = [0.0_f32; 4];
+    for corner in 0..8_usize {
+        let offset = [corner >> 2 & 1, corner >> 1 & 1, corner & 1];
+        let weight: f32 = (0..3)
+            .map(|i| if offset[i] == 1 { frac[i] } else { 1.0 - frac[i] })
+            .product();
+        if weight == 0.0 {
+            continue;
+        }
+        let index = ((base[0] + offset[0]) * GRID + base[1] + offset[1]) * GRID + base[2] + offset[2];
+        let Some(Some(point)) = INK_GRID.get(index) else {
+            return srgb_to_cmyk(rgb.map(|v| f32::from(v) / 255.0));
+        };
+        for (sum, v) in ink.iter_mut().zip(point) {
+            *sum += weight * v;
+        }
+    }
+    Some(ink.map(|v| v.clamp(0.0, 1.0)))
+}
+
 fn solve_ink(rgb: [f32; 3]) -> Option<[f32; 4]> {
     let forward: &TransformF32Executor = FORWARD.as_ref()?.as_ref();
     let k0 = 1.0 - rgb[0].max(rgb[1]).max(rgb[2]);
@@ -116,3 +163,4 @@ fn solve(a: [[f32; 3]; 3], b: [f32; 3]) -> Option<[f32; 3]> {
     });
     x.iter().all(|v| v.is_finite()).then_some(x)
 }
+

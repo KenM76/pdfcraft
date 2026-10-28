@@ -97,6 +97,11 @@ impl<'a, 'b> CmykGroup<'a, 'b> {
         device.intersect(self.bbox)
     }
 
+    /// PdfCraft patch (71): the document's output intent, if it has a CMYK one.
+    pub fn output_intent(&self) -> Option<std::sync::Arc<crate::OutputIntent>> {
+        crate::OutputIntent::of(self.xref, &self.interpreter_cache.object_cache)
+    }
+
     /// Whether a page's contents were charged to its content budget by [`Self::interpret`].
     pub(crate) fn charged(&self) -> bool {
         self.charged.get()

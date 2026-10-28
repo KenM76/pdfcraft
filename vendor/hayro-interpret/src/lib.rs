@@ -40,6 +40,7 @@ mod device;
 mod function;
 mod interpret;
 mod ocg;
+mod output_intent;
 mod soft_mask;
 mod types;
 mod x_object;
@@ -56,6 +57,7 @@ pub mod util;
 
 pub use cache::CacheKey;
 pub use cmyk_group::CmykGroup;
+pub use output_intent::OutputIntent;
 pub use context::*;
 pub use device::*;
 pub use function::Function;

@@ -2,6 +2,7 @@
 
 use crate::cache::{Cache, CacheKey};
 use crate::function::Function;
+use crate::output_intent::OutputIntent;
 use crate::util::hash128;
 use hayro_syntax::object;
 use hayro_syntax::object::Array;
@@ -201,11 +202,10 @@ impl ColorSpaceType {
                                         // sRGB. If we ever implement PDF-to-PDF, we probably want to
                                         // let the user pass the native color type and don't make this optimization
                                         // if it's not sRGB.
-                                        if icc.is_srgb() {
-                                            Self::DeviceRgb
-                                        } else {
-                                            Self::ICCBased(icc)
-                                        }
+                                        // PdfCraft patch (71): an sRGB profile stays ICC-based (it
+                                        // converts as fast), so an ink pass converts it through the
+                                        // output intent where `DeviceRGB` is not.
+                                        Self::ICCBased(icc)
                                     })
                                     .or_else(|| {
                                         dict.get::<Object<'_>>(ALTERNATE)
@@ -885,6 +885,16 @@ impl Lab {
         Some(Self { range, white_point })
     }
 
+    /// PdfCraft patch (71): `lab` held to L\* 0..=100 and the space's a\*/b\* `/Range`.
+    fn clamped(&self, [l, a, b]: [f32; 3]) -> [f32; 3] {
+        let [min_a, max_a, min_b, max_b] = self.range;
+        [
+            clamp_component(l, 0.0, 100.0),
+            clamp_component(a, min_a, max_a),
+            clamp_component(b, min_b, max_b),
+        ]
+    }
+
     /// The white point the space's L\*a\*b\* values are relative to (ISO 32000-2
     /// §8.6.5.4). A missing or degenerate entry falls back to a flat white point
     /// so hostile input cannot break the conversion.
@@ -1268,6 +1278,16 @@ impl ICCProfile {
         })))
     }
 
+    /// PdfCraft patch (71): whether `other` is this very profile.
+    pub(crate) fn same(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+
+    /// PdfCraft patch (71): the profile colours are read in.
+    pub(crate) fn src_profile(&self) -> &ColorProfile {
+        &self.0.src_profile
+    }
+
     fn is_srgb(&self) -> bool {
         self.0.is_srgb
     }
@@ -1376,6 +1396,43 @@ pub struct Color {
     color_space: ColorSpace,
     components: ColorComponents,
     opacity: f32,
+    /// PdfCraft patch (71).
+    intent: RenderingIntent,
+}
+
+/// PdfCraft patch (71): a rendering intent (ISO 32000-2 §8.6.5.8).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RenderingIntent {
+    /// `AbsoluteColorimetric`.
+    AbsoluteColorimetric,
+    /// `RelativeColorimetric`, also the one used for an unknown name.
+    #[default]
+    RelativeColorimetric,
+    /// `Saturation`.
+    Saturation,
+    /// `Perceptual`.
+    Perceptual,
+}
+
+impl RenderingIntent {
+    /// The intent `name` names; `RelativeColorimetric` for an unrecognised one (§8.6.5.8).
+    pub fn from_name(name: &[u8]) -> Self {
+        match name {
+            b"AbsoluteColorimetric" => Self::AbsoluteColorimetric,
+            b"Saturation" => Self::Saturation,
+            b"Perceptual" => Self::Perceptual,
+            _ => Self::RelativeColorimetric,
+        }
+    }
+
+    pub(crate) fn to_moxcms(self) -> moxcms::RenderingIntent {
+        match self {
+            Self::AbsoluteColorimetric => moxcms::RenderingIntent::AbsoluteColorimetric,
+            Self::RelativeColorimetric => moxcms::RenderingIntent::RelativeColorimetric,
+            Self::Saturation => moxcms::RenderingIntent::Saturation,
+            Self::Perceptual => moxcms::RenderingIntent::Perceptual,
+        }
+    }
 }
 
 impl Color {
@@ -1390,7 +1447,14 @@ impl Color {
             color_space,
             components,
             opacity,
+            intent: RenderingIntent::default(),
         }
+    }
+
+    /// PdfCraft patch (71): the same colour, painted under rendering intent `intent`.
+    pub(crate) fn with_intent(mut self, intent: RenderingIntent) -> Self {
+        self.intent = intent;
+        self
     }
 
     /// Return the color as an RGBA color.
@@ -1401,37 +1465,13 @@ impl Color {
 
     /// PdfCraft patch (70): the colour as process ink tints `[C, M, Y, K]` (0 = no ink) and
     /// its opacity, for blending in a `DeviceCMYK` transparency group (ISO 32000-2 §11.3.4).
-    ///
-    /// `DeviceCMYK` gives its components. `DeviceGray` is black ink alone, `K = 1 − gray`
-    /// (§10.4.2.2). An additive colour (`DeviceRGB`, `CalRGB`, `Lab`, a three-component
-    /// ICCBased colour) is the ink that draws back to it through the CMYK profile (patch
-    /// (69)). `None` for every other space, ICCBased CMYK included (it keeps its own
-    /// profile), and the caller draws it as before.
-    pub fn ink_tints(&self) -> Option<([f32; 4], f32)> {
-        let c = |i: usize| {
-            self.components
-                .get(i)
-                .copied()
-                .unwrap_or(0.0)
-                .clamp(0.0, 1.0)
-        };
-        let tints = match self.color_space.0.as_ref() {
-            ColorSpaceType::DeviceCmyk => [c(0), c(1), c(2), c(3)],
-            ColorSpaceType::DeviceGray => [0.0, 0.0, 0.0, 1.0 - c(0)],
-            ColorSpaceType::DeviceRgb | ColorSpaceType::CalRgb(_) | ColorSpaceType::Lab(_) => {
-                self.ink_from_srgb()?
-            }
-            ColorSpaceType::ICCBased(icc) if icc.0.number_components == 3 => {
-                self.ink_from_srgb()?
-            }
-            _ => return None,
-        };
+    /// See [`space_ink_tints`]; `None` and the caller draws it as before. An ICC-based RGB
+    /// colour goes through `target`, the document's output intent, when there is one (patch
+    /// (71)).
+    pub fn ink_tints(&self, target: Option<&OutputIntent>) -> Option<([f32; 4], f32)> {
+        let target = target.map(|t| (t, self.intent));
+        let tints = space_ink_tints(&self.color_space, &self.components, false, target)?;
         Some((tints, self.opacity.clamp(0.0, 1.0)))
-    }
-
-    fn ink_from_srgb(&self) -> Option<[f32; 4]> {
-        let [r, g, b, _] = self.to_rgba().components();
-        crate::cmyk_inverse::srgb_to_cmyk([r, g, b])
     }
 
     /// Create a color from RGBA.
@@ -1441,7 +1481,78 @@ impl Color {
             color_space: ColorSpace::device_rgb(),
             components: smallvec![c[0], c[1], c[2]],
             opacity: c[3],
+            intent: RenderingIntent::default(),
         }
+    }
+}
+
+/// PdfCraft patch (45), widened by (70): colour `c` of `space` as process ink tints
+/// `[C, M, Y, K]` (0 = no ink).
+///
+/// `DeviceCMYK` and four-component ICCBased give their components, taken as the group's own
+/// process inks. `DeviceGray` and one-component ICCBased are black ink alone, `K = 1 − gray`
+/// (§10.4.2.2). An additive colour (`DeviceRGB`, `CalRGB`, `CalGray`, `Lab`, three-component
+/// ICCBased) is the ink that draws back to it through the CMYK profile (patch (69)). A
+/// Separation for `All` is the tint on every ink (§8.6.6.4); other Separation and DeviceN
+/// colours, and Indexed ones, are the tints of the alternate or base colour they stand for
+/// (`nested` stops a second level, which the spec does not allow). Patch (71): with a
+/// `target`, three-component ICCBased colours convert through its profile under its intent,
+/// the way a colour-managed device prints them; `DeviceRGB` is left uncalibrated. `None` for
+/// anything else.
+fn space_ink_tints(
+    space: &ColorSpace,
+    c: &[f32],
+    nested: bool,
+    target: Option<(&OutputIntent, RenderingIntent)>,
+) -> Option<[f32; 4]> {
+    let get = |i: usize| c.get(i).copied().unwrap_or(0.0).clamp(0.0, 1.0);
+    let get_raw = |i: usize| c.get(i).copied().unwrap_or(0.0);
+    let from_srgb = || {
+        let [r, g, b, _] = space.to_rgba(c, 1.0, false).components();
+        crate::cmyk_inverse::srgb_to_cmyk([r, g, b])
+    };
+    match space.0.as_ref() {
+        ColorSpaceType::DeviceCmyk => Some([get(0), get(1), get(2), get(3)]),
+        ColorSpaceType::ICCBased(icc) if icc.0.number_components == 4 => {
+            Some([get(0), get(1), get(2), get(3)])
+        }
+        ColorSpaceType::DeviceGray => Some([0.0, 0.0, 0.0, 1.0 - get(0)]),
+        ColorSpaceType::ICCBased(icc) if icc.0.number_components == 1 => {
+            Some([0.0, 0.0, 0.0, 1.0 - get(0)])
+        }
+        ColorSpaceType::Lab(lab) => target
+            .and_then(|(t, intent)| t.lab_to_ink(intent, lab.clamped([get_raw(0), get_raw(1), get_raw(2)])))
+            .or_else(from_srgb),
+        ColorSpaceType::DeviceRgb | ColorSpaceType::CalRgb(_) | ColorSpaceType::CalGray(_) => from_srgb(),
+        ColorSpaceType::ICCBased(icc) if icc.0.number_components == 3 => target
+            .and_then(|(t, intent)| t.rgb_to_ink(icc, intent, [get(0), get(1), get(2)]))
+            .or_else(from_srgb),
+        ColorSpaceType::Separation(s) if s.is_all => Some([get(0); 4]),
+        ColorSpaceType::Separation(s) if !nested => {
+            let alternate = eval_tint_transform(s.tint_transform.as_ref(), &s.alternate_space, &[get(0)]);
+            space_ink_tints(&s.alternate_space, &alternate, true, target)
+        }
+        ColorSpaceType::DeviceN(d) if !nested => {
+            let tints: Vec<f32> = (0..usize::from(d.num_components)).map(get).collect();
+            let alternate = eval_tint_transform(d.tint_transform.as_ref(), &d.alternate_space, &tints);
+            space_ink_tints(&d.alternate_space, &alternate, true, target)
+        }
+        ColorSpaceType::Indexed(i) if !nested => {
+            // The palette holds the base colour's components scaled to 0..=1; only a base
+            // whose tints read them as they are is looked up, the rest go through sRGB.
+            let index = (c.first().copied().unwrap_or(0.0).clamp(0.0, f32::from(i.hival)) + 0.5) as usize;
+            let entry = i.values.get(index)?;
+            match i.base.0.as_ref() {
+                ColorSpaceType::DeviceCmyk | ColorSpaceType::DeviceGray => {
+                    space_ink_tints(&i.base, entry, true, target)
+                }
+                ColorSpaceType::ICCBased(_) => {
+                    space_ink_tints(&i.base, entry, true, target)
+                }
+                _ => from_srgb(),
+            }
+        }
+        _ => None,
     }
 }
 
@@ -1450,7 +1561,7 @@ impl Color {
 /// (69)); for an image drawn into a `DeviceCMYK` blending space. `None` when the profile
 /// can't be evaluated.
 pub fn srgb8_ink_tints(rgb: [u8; 3]) -> Option<[f32; 4]> {
-    crate::cmyk_inverse::srgb_to_cmyk(rgb.map(|v| f32::from(v) / 255.0))
+    crate::cmyk_inverse::srgb8_to_cmyk(rgb)
 }
 
 /// PdfCraft patch (70): `input`, 8-bit `DeviceCMYK` pixels (four bytes each), converted to

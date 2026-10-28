@@ -487,9 +487,12 @@ pub(crate) struct Renderer {
 /// them. The black pass paints black ink as a grey, so a separable mode blends it like any
 /// tint, and of the nonseparable modes Hue, Saturation and Color keep the backdrop's grey
 /// while Luminosity takes the source's: §11.3.5.3's rule for the K component.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 struct InkState {
     pass: Option<InkPass>,
+    /// PdfCraft patch (71): the document's output intent, which ICC-based colours convert
+    /// through.
+    target: Option<Arc<hayro_interpret::OutputIntent>>,
     /// Something in the group has no ink tints (a pattern, an image, an ICCBased CMYK colour):
     /// the group is drawn as before instead.
     unsupported: bool,
@@ -507,7 +510,7 @@ impl InkState {
     /// The colour a pass paints for `color`; transparent, with the group marked unsupported,
     /// when the colour has no ink tints.
     fn paint(&mut self, pass: InkPass, color: &Color) -> AlphaColor<Srgb> {
-        let Some(([c, m, y, k], alpha)) = color.ink_tints() else {
+        let Some(([c, m, y, k], alpha)) = color.ink_tints(self.target.as_deref()) else {
             self.unsupported = true;
             return AlphaColor::TRANSPARENT;
         };
@@ -518,14 +521,10 @@ impl InkState {
     }
 }
 
-/// PdfCraft patch (70): the most distinct colours an image drawn in an ink pass converts; each
-/// is a Newton solve through the CMYK profile. A busier image declines the pass.
-const MAX_INK_IMAGE_COLOURS: usize = 1 << 16;
-
 /// PdfCraft patch (70): `image`, already converted to sRGB, as ink pass `pass` paints it: each
-/// pixel's ink tints (`hayro_interpret::color::srgb8_ink_tints`, gray as black ink alone, ISO
-/// 32000-2 §10.4.2.2) complemented into the pass's colour, as [`InkState::paint`] does for a
-/// solid colour. `None` past [`MAX_INK_IMAGE_COLOURS`] or when the profile can't be evaluated.
+/// pixel's ink tints (`hayro_interpret::color::srgb8_ink_tints`, interpolated from a grid of
+/// solves; gray as black ink alone, ISO 32000-2 §10.4.2.2) complemented into the pass's colour,
+/// as [`InkState::paint`] does for a solid colour. `None` when the profile can't be evaluated.
 fn ink_image(image: ImageData, pass: InkPass) -> Option<ImageData> {
     let to_byte = |t: f32| (255.0 - t.clamp(0.0, 1.0) * 255.0).round() as u8;
     match image {
@@ -537,21 +536,19 @@ fn ink_image(image: ImageData, pass: InkPass) -> Option<ImageData> {
             Some(ImageData::Luma(l))
         }
         ImageData::Rgb(mut r) => {
-            let mut seen: HashMap<[u8; 3], [u8; 3]> = HashMap::default();
+            // Runs of one colour (flat areas) are converted once.
+            let mut last: Option<([u8; 3], [u8; 3])> = None;
             for px in r.data.as_chunks_mut::<3>().0 {
                 let key = *px;
-                let out = match seen.get(&key) {
-                    Some(out) => *out,
-                    None => {
-                        if seen.len() >= MAX_INK_IMAGE_COLOURS {
-                            return None;
-                        }
+                let out = match last {
+                    Some((seen, out)) if seen == key => out,
+                    _ => {
                         let [c, m, y, k] = hayro_interpret::color::srgb8_ink_tints(key)?;
                         let out = match pass {
                             InkPass::Cmy => [to_byte(c), to_byte(m), to_byte(y)],
                             InkPass::K => [to_byte(k); 3],
                         };
-                        seen.insert(key, out);
+                        last = Some((key, out));
                         out
                     }
                 };
@@ -1226,6 +1223,7 @@ impl Renderer {
             image_transparency_stack: Vec::new(),
             ink: InkState {
                 pass: Some(pass),
+                target: group.output_intent(),
                 unsupported: false,
             },
             knockout: Vec::new(),

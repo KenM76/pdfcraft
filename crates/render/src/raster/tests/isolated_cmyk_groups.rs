@@ -21,7 +21,7 @@ use std::sync::Arc;
 fn isolated_groups_blend_in_device_cmyk() {
     // (blend mode, tint A, tint B, A then B blended in DeviceCMYK, worked out by hand)
     type Cell = (&'static str, [f32; 4], [f32; 4], [f32; 4]);
-    let cells: [Cell; 7] = [
+    let cells: [Cell; 10] = [
         // |(1,0,1,1) − (1,1,1,0)| = (0,1,0,1), complemented back: green.
         ("Difference", [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0], [1.0, 0.0, 1.0, 0.0]),
         ("Exclusion", [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0], [1.0, 0.0, 1.0, 0.0]),
@@ -65,7 +65,7 @@ fn isolated_groups_blend_in_device_cmyk() {
             "%PDF-1.7
 1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj
 2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj
-3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 370 60] /Group << /S /Transparency /CS /DeviceCMYK >> /Contents 4 0 R /Resources << /XObject << {names}>> >> >> endobj
+3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 520 60] /Group << /S /Transparency /CS /DeviceCMYK >> /Contents 4 0 R /Resources << /XObject << {names}>> >> >> endobj
 4 0 obj << /Length {} >> stream
 {page}
 endstream endobj
@@ -321,4 +321,37 @@ trailer << /Root 1 0 R >>
         let distance = drawn.iter().zip(&fill).map(|(a, b)| a.abs_diff(*b)).max().unwrap_or(0);
         assert!(distance <= 3, "{what} {drawn:?}, fill {fill:?}");
     }
+}
+
+/// Vendored hayro-interpret patch (70): an image pixel's ink is interpolated from a grid of
+/// solves, not solved for each colour; drawn back through the CMYK profile it lands within a
+/// few 8-bit levels of the pixel, across in-gamut colours between the grid points. The grid
+/// is built once, quickly.
+#[test]
+fn interpolated_image_ink_draws_back_to_the_pixel() {
+    use hayro::hayro_interpret::color::{cmyk_to_srgb8, srgb8_ink_tints};
+    let start = std::time::Instant::now();
+    let _ = srgb8_ink_tints([0, 0, 0]);
+    let built = start.elapsed();
+    let mut worst = 0;
+    for r in (60..=200).step_by(7) {
+        for g in (60..=200).step_by(11) {
+            for b in (60..=200).step_by(13) {
+                let rgb = [r as u8, g as u8, b as u8];
+                // Muted colours, inside the profile's gamut; a saturated one lands where the
+                // clamped solve stops, interpolated or not.
+                if rgb.iter().max().unwrap_or(&0) - rgb.iter().min().unwrap_or(&0) > 50 {
+                    continue;
+                }
+                let ink = srgb8_ink_tints(rgb).expect("the profile evaluates");
+                let mut drawn = [0_u8; 3];
+                cmyk_to_srgb8(&ink.map(|t| (t * 255.0).round() as u8), &mut drawn).expect("converts");
+                let d = drawn.iter().zip(&rgb).map(|(a, b)| a.abs_diff(*b)).max().unwrap_or(0);
+                worst = worst.max(d);
+            }
+        }
+    }
+    eprintln!("grid built in {built:?}; worst {worst} levels");
+    assert!(worst <= 3, "worst {worst} levels");
+    assert!(built < std::time::Duration::from_secs(5), "grid built in {built:?}");
 }
