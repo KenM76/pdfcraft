@@ -3,6 +3,7 @@
 mod cid_fallback_query;
 mod cmyk_group_image_inks;
 mod gray_image_inks;
+mod ink_blend_rounding;
 mod inline_image_ei;
 mod jbig2_invariants;
 mod knockout_backdrop;

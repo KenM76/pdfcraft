@@ -20,7 +20,8 @@ use vello_cpu::color::palette::css::BLACK;
 use vello_cpu::color::{AlphaColor, PremulRgba8, Srgb};
 use vello_cpu::peniko::{ColorStop, Compose, Fill, Gradient, ImageQuality, ImageSampler, Mix};
 use vello_cpu::{
-    Image, ImageSource, Mask, PaintType, Pixmap, RenderContext, RenderSettings, peniko,
+    Image, ImageSource, Mask, PaintType, Pixmap, RenderContext, RenderMode, RenderSettings,
+    peniko,
 };
 
 /// PdfCraft patch: largest image drawn, in pixels (2^28 ≈ 268 MP, well above real page images).
@@ -563,6 +564,9 @@ struct InkState {
     /// PdfCraft patch (72): the spot inks the group's paints name, in the order met; a
     /// [`InkPass::Spot`] pass indexes it.
     spots: Vec<hayro_interpret::Spot>,
+    /// PdfCraft patch (81): the group used a nonseparable blend mode, which vello_cpu's
+    /// floating-point pipeline mixes wrongly, so the pass is redrawn in integers.
+    nonseparable: bool,
 }
 
 /// PdfCraft patch (72): the most spot inks an overprinting group is drawn with.
@@ -1484,12 +1488,14 @@ impl Renderer {
 
     /// PdfCraft patch (72): a nonseparable mode mixes inks, so a one-ink pass can't draw it.
     fn refuse_nonseparable_in_channel(&mut self, blend_mode: BlendMode) {
-        if self.ink.pass.is_some_and(InkPass::is_channel)
-            && matches!(
-                blend_mode,
-                BlendMode::Hue | BlendMode::Saturation | BlendMode::Color | BlendMode::Luminosity
-            )
-        {
+        let nonseparable = matches!(
+            blend_mode,
+            BlendMode::Hue | BlendMode::Saturation | BlendMode::Color | BlendMode::Luminosity
+        );
+        if nonseparable && self.ink.pass.is_some() {
+            self.ink.nonseparable = true;
+        }
+        if nonseparable && self.ink.pass.is_some_and(InkPass::is_channel) {
             self.ink.unsupported = true;
         }
     }
@@ -1506,8 +1512,35 @@ impl Renderer {
         height: u16,
         spots: &mut Vec<hayro_interpret::Spot>,
     ) -> Option<Pixmap> {
+        // PdfCraft patch (81): an ink pass blends in floating point and rounds once, at the end;
+        // the integer pipeline rounds every blend, so a blended ink landed a level off the
+        // same ink painted flat. A group with a nonseparable mode is drawn in integers.
+        let size = (width, height);
+        let quality = RenderMode::OptimizeQuality;
+        let (pix, nonseparable) = self.ink_pass_in(group, pass, offset, size, spots, quality);
+        if nonseparable {
+            let speed = RenderMode::OptimizeSpeed;
+            return self.ink_pass_in(group, pass, offset, size, spots, speed).0;
+        }
+        pix
+    }
+
+    /// [`Self::ink_pass`] drawn in `mode`, and whether the group used a nonseparable blend mode.
+    fn ink_pass_in(
+        &self,
+        group: &hayro_interpret::CmykGroup<'_, '_>,
+        pass: InkPass,
+        offset: (f64, f64),
+        (width, height): (u16, u16),
+        spots: &mut Vec<hayro_interpret::Spot>,
+        mode: RenderMode,
+    ) -> (Option<Pixmap>, bool) {
+        let settings = RenderSettings {
+            render_mode: mode,
+            ..derive_settings(self.ctx.render_settings())
+        };
         let mut renderer = Self {
-            ctx: RenderContext::new_with(width, height, derive_settings(self.ctx.render_settings())),
+            ctx: RenderContext::new_with(width, height, settings),
             color_replacement: None,
             in_annotations: self.in_annotations,
             inside_pattern: self.inside_pattern,
@@ -1523,6 +1556,7 @@ impl Renderer {
                 target: group.output_intent(),
                 unsupported: false,
                 spots: core::mem::take(spots),
+                nonseparable: false,
             },
             knockout: Vec::new(),
             erasing: false,
@@ -1536,14 +1570,15 @@ impl Renderer {
         group.interpret(&mut renderer, offset);
         renderer.ctx.pop_layer();
         *spots = core::mem::take(&mut renderer.ink.spots);
+        let nonseparable = renderer.ink.nonseparable;
         if renderer.ink.unsupported {
-            return None;
+            return (None, nonseparable);
         }
         let mut pix = Pixmap::new(width, height);
         renderer.ctx.flush();
         let mut resources = vello_cpu::Resources::default();
         renderer.ctx.render_to_pixmap(&mut resources, &mut pix);
-        Some(pix)
+        (Some(pix), nonseparable)
     }
 
     /// PdfCraft patch: remaps a solid paint colour through `color_replacement`, if one is

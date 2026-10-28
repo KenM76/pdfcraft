@@ -80,6 +80,8 @@ features = [
     "std",
     "png",
     "u8_pipeline",
+    # PdfCraft patch (81): the CMYK ink passes blend in floating point.
+    "f32_pipeline",
 ]
 default-features = false
 
