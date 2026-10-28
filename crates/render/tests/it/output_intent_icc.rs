@@ -18,7 +18,6 @@ const CMYK_PROFILE: &[u8] = include_bytes!("../../../../vendor/hayro-interpret/a
 /// CMYK (C = 1 - L, M = a, Y = 1 - b, K = 0, all normalised), so colours can convert into it.
 /// The renderer and [`ink`] read the same bytes, so the table need only be valid.
 fn output_profile() -> Vec<u8> {
-    let mut profile = ColorProfile::new_from_slice(CMYK_PROFILE).unwrap();
     let mut clut = Vec::new();
     for l in [0u16, 65535] {
         for a in [0u16, 65535] {
@@ -27,6 +26,21 @@ fn output_profile() -> Vec<u8> {
             }
         }
     }
+    profile_with(clut)
+}
+
+/// An output profile that prints every colour as one ink, `GREEN`: a green sRGB can't show,
+/// so the screen colour can't be turned back into the same ink.
+fn green_profile() -> Vec<u8> {
+    let green = GREEN.map(|t| (t * 65535.0) as u16);
+    profile_with(green.repeat(8))
+}
+
+const GREEN: [f32; 4] = [0.85, 0.0, 1.0, 0.0];
+
+/// The bundled profile with a two-point `lut16` from Lab into CMYK whose grid is `clut`.
+fn profile_with(clut: Vec<u16>) -> Vec<u8> {
+    let mut profile = ColorProfile::new_from_slice(CMYK_PROFILE).unwrap();
     let lut = LutWarehouse::Lut(LutDataType {
         num_input_channels: 3,
         num_output_channels: 4,
@@ -71,7 +85,15 @@ fn stream(dict: &str, data: &[u8]) -> Vec<u8> {
 /// names the CMYK output intent when `intent`.
 fn render(intent: bool, content: &str) -> RenderedPage {
     let [c, m, y, k] = ink([0.0, 0.0, 1.0]);
-    let body = format!("{c:.4} {m:.4} {y:.4} {k:.4} k 10 10 80 80 re f {content}");
+    let reference = format!("{c:.4} {m:.4} {y:.4} {k:.4} k 10 10 80 80 re f");
+    render_in(if intent { Some(output_profile()) } else { None }, "", "", &reference, content)
+}
+
+/// The page [`render`] draws, with `profile` the output intent's, `group` the page group,
+/// `states` the `ExtGState` resources and `reference` the reference square.
+fn render_in(profile: Option<Vec<u8>>, group: &str, states: &str, reference: &str, content: &str) -> RenderedPage {
+    let body = format!("{reference} {content}");
+    let intent = profile.is_some();
     let intents = if intent {
         "/OutputIntents [<< /Type /OutputIntent /S /GTS_PDFX /OutputConditionIdentifier (Synthetic) /DestOutputProfile 7 0 R >>]"
     } else {
@@ -80,11 +102,12 @@ fn render(intent: bool, content: &str) -> RenderedPage {
     let objects: Vec<Vec<u8>> = vec![
         format!("<< /Type /Catalog /Pages 2 0 R {intents} >>").into_bytes(),
         b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
-        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Contents 4 0 R /Resources << /ColorSpace << /CS0 [/ICCBased 5 0 R] >> /XObject << /Im0 6 0 R >> >> >>".to_vec(),
+        format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Contents 4 0 R {group} /Resources << /ExtGState << {states} >> /ColorSpace << /CS0 [/ICCBased 5 0 R] >> /XObject << /Im0 6 0 R /Im1 8 0 R >> >> >>").into_bytes(),
         stream("", body.as_bytes()),
         stream("/N 3", &srgb_profile()),
         stream("/Type /XObject /Subtype /Image /Width 1 /Height 1 /BitsPerComponent 8 /ColorSpace [/ICCBased 5 0 R]", &[0, 0, 255]),
-        stream("/N 4", &output_profile()),
+        stream("/N 4", &profile.unwrap_or_default()),
+        stream("/Type /XObject /Subtype /Image /Width 1 /Height 1 /BitsPerComponent 8 /ColorSpace [/Indexed [/ICCBased 5 0 R] 0 <0000FF>]", &[0]),
     ];
     let mut bytes = b"%PDF-1.7\n".to_vec();
     let mut offsets = Vec::new();
@@ -118,6 +141,7 @@ fn close(a: [u8; 3], b: [u8; 3]) -> bool {
 
 const PAINT: &str = "/CS0 cs 0 0 1 sc 110 10 80 80 re f";
 const IMAGE: &str = "q 80 0 0 80 110 10 cm /Im0 Do Q";
+const INDEXED_IMAGE: &str = "q 80 0 0 80 110 10 cm /Im1 Do Q";
 
 #[test]
 fn an_icc_colour_is_drawn_through_the_output_intent() {
@@ -142,4 +166,31 @@ fn without_an_output_intent_an_icc_colour_is_drawn_as_its_profile_says() {
         assert!(close(drawn, [0, 0, 255]), "{content}: {drawn:?}");
         assert!(!close(drawn, reference), "{content}: the print ink {reference:?} is not pure blue");
     }
+}
+
+const CMYK_GROUP: &str = "/Group << /S /Transparency /CS /DeviceCMYK >>";
+
+/// In a `DeviceCMYK` page group an ICC image deposits the ink the output intent gives it
+/// (patch (75)), even one sRGB can't show: drawn as the output intent's colour and turned back
+/// into ink, the green came back as another ink and showed as a different green.
+fn assert_prints_green(states: &str) {
+    let [c, m, y, k] = GREEN;
+    let reference = format!("{c} {m} {y} {k} k 10 10 80 80 re f");
+    for content in [IMAGE, INDEXED_IMAGE] {
+        let page = render_in(Some(green_profile()), CMYK_GROUP, states, &reference, content);
+        let (reference, drawn) = (at(&page, 50, 50), at(&page, 150, 50));
+        assert!(close(drawn, reference), "{states} {content}: drawn {drawn:?}, reference {reference:?}");
+    }
+}
+
+/// Drawn in two passes, cyan-magenta-yellow and black, as a group with blend modes is.
+#[test]
+fn in_a_blending_cmyk_page_group_an_icc_image_prints_the_output_intents_ink() {
+    assert_prints_green("/BM << /BM /Multiply >>");
+}
+
+/// Drawn one ink at a time, as a group with overprint is.
+#[test]
+fn in_an_overprinting_cmyk_page_group_an_icc_image_prints_the_output_intents_ink() {
+    assert_prints_green("/OP << /OP true /op true >>");
 }

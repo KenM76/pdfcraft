@@ -1057,6 +1057,10 @@ pub(crate) fn decode_ink(
     let components = get_components(&ctx.decoded.data, ctx.width, height, &ctx.color_space, ctx.bits_per_component)?;
     let mut samples = apply_decode_array(&components, &ctx.color_space, ctx.bits_per_component, &ctx.decode_arr)?;
     fix_image_length(&mut samples, ctx.width, &mut height, 0.0, &ctx.color_space)?;
+    // PdfCraft patch (75): an image the output intent proofs takes its inks from it.
+    if obj.proof.is_some() && ctx.color_space.proofs() {
+        return decode_proofed_inks(obj, &[component], target_dimension);
+    }
     // An indexed sample's component is its base colour's.
     let indexed = match ctx.color_space.kind() {
         crate::color::ColorSpaceType::Indexed(i) => Some(i),
@@ -1072,13 +1076,79 @@ pub(crate) fn decode_ink(
             f32_to_u8(1.0 - tint.unwrap_or(0.0).clamp(0.0, 1.0))
         })
         .collect();
-    let image = ImageData::Luma(LumaData {
-        data,
-        width: ctx.width,
+    finish_ink(obj, &mut ctx, data, false, height, target_dimension)
+}
+
+/// PdfCraft patch (75): `obj`, an image the output intent proofs, decoded as the inks
+/// `components` (0..4, C M Y K) as the output intent prints it: one ink as a gray of `1 − tint`,
+/// three as RGB of `1 − tint` each, with the image's alpha. `None` for any other image.
+pub(crate) fn decode_proofed_inks(
+    obj: &ImageXObject<'_>,
+    components: &[usize],
+    target_dimension: Option<(u32, u32)>,
+) -> Option<DecodedRaster> {
+    let (target, intent) = obj.proof.as_ref()?;
+    let mut ctx = decode_context(obj, target_dimension)?;
+    if !ctx.color_space.proofs() || !matches!(components.len(), 1 | 3) {
+        return None;
+    }
+    let mut height = ctx.height;
+    let components_data = get_components(
+        &ctx.decoded.data,
+        ctx.width,
         height,
-        interpolate: obj.interpolate,
-        scale_factors: ctx.scale_factors,
-    });
+        &ctx.color_space,
+        ctx.bits_per_component,
+    )?;
+    let mut samples = apply_decode_array(
+        &components_data,
+        &ctx.color_space,
+        ctx.bits_per_component,
+        &ctx.decode_arr,
+    )?;
+    fix_image_length(&mut samples, ctx.width, &mut height, 0.0, &ctx.color_space)?;
+    let inks = components
+        .iter()
+        .map(|c| ctx.color_space.proofed_ink(target, *intent, *c, &samples))
+        .collect::<Option<Vec<_>>>()?;
+    let pixels = inks.first()?.len();
+    let mut data = Vec::with_capacity(pixels.checked_mul(inks.len())?);
+    for p in 0..pixels {
+        data.extend(
+            inks.iter()
+                .map(|ink| f32_to_u8(1.0 - ink.get(p).copied().unwrap_or(0.0))),
+        );
+    }
+    let rgb = inks.len() == 3;
+    finish_ink(obj, &mut ctx, data, rgb, height, target_dimension)
+}
+
+/// `data`, one ink's grays or, when `rgb`, three inks' RGB, as the decoded image with `obj`'s alpha.
+fn finish_ink<'a>(
+    obj: &ImageXObject<'a>,
+    ctx: &mut DecodeContext<'a>,
+    data: Vec<u8>,
+    rgb: bool,
+    mut height: u32,
+    target_dimension: Option<(u32, u32)>,
+) -> Option<DecodedRaster> {
+    let image = if rgb {
+        ImageData::Rgb(RgbData {
+            data,
+            width: ctx.width,
+            height,
+            interpolate: obj.interpolate,
+            scale_factors: ctx.scale_factors,
+        })
+    } else {
+        ImageData::Luma(LumaData {
+            data,
+            width: ctx.width,
+            height,
+            interpolate: obj.interpolate,
+            scale_factors: ctx.scale_factors,
+        })
+    };
     let alpha = resolve_alpha(
         obj,
         &mut ctx.decoded,

@@ -311,6 +311,73 @@ impl ColorSpace {
         }
     }
 
+    /// PdfCraft patch (75): whether [`Self::proofed`] applies to this space.
+    pub(crate) fn proofs(&self) -> bool {
+        match self.0.as_ref() {
+            ColorSpaceType::ICCBased(icc) => {
+                !icc.is_lab() && matches!(icc.0.number_components, 3 | 4)
+            }
+            ColorSpaceType::Indexed(i) => i.base.proofs(),
+            _ => false,
+        }
+    }
+
+    /// PdfCraft patch (75): ink `component` (0..4, C M Y K) of each colour in `samples`, whole
+    /// colours of this space, as the output intent prints it under `intent`: the tints an image
+    /// deposits in an overprinting `DeviceCMYK` group, without a round trip through sRGB. `None`
+    /// when the space doesn't [`Self::proofs`] or no transform builds.
+    pub(crate) fn proofed_ink(
+        &self,
+        target: &OutputIntent,
+        intent: RenderingIntent,
+        component: usize,
+        samples: &[f32],
+    ) -> Option<Vec<f32>> {
+        const CHUNK: usize = 1 << 16;
+        let pick = |ink: Vec<f32>| -> Vec<f32> {
+            ink.chunks_exact(4)
+                .map(|c| c.get(component).copied().unwrap_or(0.0))
+                .collect()
+        };
+        if component >= 4 || !self.proofs() {
+            return None;
+        }
+        match self.0.as_ref() {
+            ColorSpaceType::ICCBased(icc) => {
+                let n = icc.0.number_components;
+                let mut out = Vec::with_capacity(samples.len() / n);
+                for chunk in samples.chunks(CHUNK.checked_mul(n)?) {
+                    out.extend(pick(target.icc_to_ink(icc, intent, chunk)?));
+                }
+                Some(out)
+            }
+            ColorSpaceType::Indexed(i) => {
+                let ColorSpaceType::ICCBased(icc) = i.base.0.as_ref() else {
+                    return None;
+                };
+                if i.values.iter().any(|v| v.len() != icc.0.number_components) {
+                    return None;
+                }
+                let palette: Vec<f32> = i.values.iter().flatten().copied().collect();
+                let palette = pick(target.icc_to_ink(icc, intent, &palette)?);
+                Some(
+                    samples
+                        .iter()
+                        .map(|v| {
+                            let v = if v.is_finite() {
+                                v.clamp(0.0, f32::from(i.hival))
+                            } else {
+                                0.0
+                            };
+                            palette.get((v + 0.5) as usize).copied().unwrap_or(0.0)
+                        })
+                        .collect(),
+                )
+            }
+            _ => None,
+        }
+    }
+
     /// PdfCraft patch (72): what kind of space this is.
     pub(crate) fn kind(&self) -> &ColorSpaceType {
         &self.0

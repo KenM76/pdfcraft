@@ -2197,6 +2197,27 @@ impl<'a> Device<'a> for Renderer {
                     self.ctx.set_aliasing_threshold(None);
                     return;
                 }
+                // PdfCraft patch (75): an image the output intent proofs takes its inks from it.
+                let proofed_inks: Option<&[usize]> = match self.ink.pass {
+                    Some(InkPass::Cmy) => Some(&[0, 1, 2]),
+                    Some(InkPass::K) => Some(&[3]),
+                    _ => None,
+                };
+                if let Some(components) = proofed_inks
+                    && r.with_proofed_inks(
+                        components,
+                        |image, alpha| {
+                            let (sx, sy) = image.scale_factors();
+                            transform *= Affine::scale_non_uniform(sx as f64, sy as f64);
+                            self.ctx.set_transform(transform);
+                            self.draw_image(image, alpha);
+                        },
+                        Some((target_width, target_height)),
+                    )
+                {
+                    self.ctx.set_aliasing_threshold(None);
+                    return;
+                }
                 r.with_rgba(
                     |image, alpha| {
                         let (sx, sy) = image.scale_factors();

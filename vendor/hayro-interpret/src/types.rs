@@ -96,7 +96,13 @@ impl RasterImage<'_> {
     /// PdfCraft patch (72): where this image gets ink `channel`'s tint from, under its
     /// overprint setting.
     pub fn ink_source(&self, channel: &crate::overprint::Channel) -> crate::overprint::ChannelSource {
-        crate::overprint::channel_source(self.0.color_space.as_ref(), channel, self.0.overprint)
+        use crate::overprint::{Channel, ChannelSource};
+        // PdfCraft patch (75): the output intent gives a proofed image's process inks.
+        let proofed = self.0.proof.is_some() && self.0.color_space.as_ref().is_some_and(|cs| cs.proofs());
+        match channel {
+            Channel::Process(i) if proofed && *i < 4 => ChannelSource::Component(*i),
+            _ => crate::overprint::channel_source(self.0.color_space.as_ref(), channel, self.0.overprint),
+        }
     }
 
     /// PdfCraft patch (72): the spot inks this image's colour space names.
@@ -114,6 +120,25 @@ impl RasterImage<'_> {
     ) {
         if let Some(decoded) = crate::x_object::decode_ink(&self.0, component, target_dimension) {
             func(decoded.image, decoded.alpha);
+        }
+    }
+
+    /// PdfCraft patch (75): like [`Self::with_ink`] for an image the document's output intent
+    /// proofs, with the inks `components` (0..4, C M Y K) as that profile prints them: one ink
+    /// as a gray, three as RGB, each `1 − tint`. `false`, and `func` isn't called, for any
+    /// other image.
+    pub fn with_proofed_inks(
+        &self,
+        components: &[usize],
+        func: impl FnOnce(ImageData, Option<LumaData>),
+        target_dimension: Option<(u32, u32)>,
+    ) -> bool {
+        match crate::x_object::decode_proofed_inks(&self.0, components, target_dimension) {
+            Some(decoded) => {
+                func(decoded.image, decoded.alpha);
+                true
+            }
+            None => false,
         }
     }
 
