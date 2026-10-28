@@ -1081,17 +1081,31 @@ pub(crate) fn decode_ink(
 
 /// PdfCraft patch (75): `obj`, an image the output intent proofs, decoded as the inks
 /// `components` (0..4, C M Y K) as the output intent prints it: one ink as a gray of `1 − tint`,
-/// three as RGB of `1 − tint` each, with the image's alpha. `None` for any other image.
+/// three as RGB of `1 − tint` each, with the image's alpha; a `DeviceCMYK`, `Separation` or
+/// `DeviceN` image, or `Indexed` over `DeviceCMYK`, gives the inks its colours name. `None` for any other image.
 pub(crate) fn decode_proofed_inks(
     obj: &ImageXObject<'_>,
     components: &[usize],
     target_dimension: Option<(u32, u32)>,
 ) -> Option<DecodedRaster> {
-    let (target, intent) = obj.proof.as_ref()?;
     let mut ctx = decode_context(obj, target_dimension)?;
-    if !ctx.color_space.proofs() || !matches!(components.len(), 1 | 3) {
+    if !matches!(components.len(), 1 | 3) {
         return None;
     }
+    // PdfCraft patch (76): a `DeviceCMYK`, `Separation` or `DeviceN` image, or `Indexed` over
+    // `DeviceCMYK`, deposits the inks its colours name, as a paint in the same space does.
+    let direct = match ctx.color_space.kind() {
+        crate::color::ColorSpaceType::Indexed(i) => i.base().is_device_cmyk(),
+        crate::color::ColorSpaceType::Separation(_) | crate::color::ColorSpaceType::DeviceN(_) => {
+            true
+        }
+        _ => ctx.color_space.is_device_cmyk(),
+    };
+    let proof = match obj.proof.as_ref() {
+        _ if direct => None,
+        Some(proof) if ctx.color_space.proofs() => Some(proof),
+        _ => return None,
+    };
     let mut height = ctx.height;
     let components_data = get_components(
         &ctx.decoded.data,
@@ -1107,10 +1121,16 @@ pub(crate) fn decode_proofed_inks(
         &ctx.decode_arr,
     )?;
     fix_image_length(&mut samples, ctx.width, &mut height, 0.0, &ctx.color_space)?;
-    let inks = components
-        .iter()
-        .map(|c| ctx.color_space.proofed_ink(target, *intent, *c, &samples))
-        .collect::<Option<Vec<_>>>()?;
+    let inks = match proof {
+        Some((target, intent)) => components
+            .iter()
+            .map(|c| ctx.color_space.proofed_ink(target, *intent, *c, &samples))
+            .collect::<Option<Vec<_>>>()?,
+        None => {
+            let target = obj.proof.as_ref().map(|(t, intent)| (t.as_ref(), *intent));
+            direct_inks(&ctx.color_space, components, &samples, target)?
+        }
+    };
     let pixels = inks.first()?.len();
     let mut data = Vec::with_capacity(pixels.checked_mul(inks.len())?);
     for p in 0..pixels {
@@ -1121,6 +1141,35 @@ pub(crate) fn decode_proofed_inks(
     }
     let rgb = inks.len() == 3;
     finish_ink(obj, &mut ctx, data, rgb, height, target_dimension)
+}
+
+/// PdfCraft patch (76): inks `components` (0..4, C M Y K) of each colour in `samples`, whole
+/// colours of `color_space`, as the tints a paint in that space deposits; `None` when a colour
+/// has none.
+fn direct_inks(
+    color_space: &ColorSpace,
+    components: &[usize],
+    samples: &[f32],
+    target: Option<(&crate::OutputIntent, crate::color::RenderingIntent)>,
+) -> Option<Vec<Vec<f32>>> {
+    let n = usize::from(color_space.num_components()).max(1);
+    let mut inks = vec![Vec::with_capacity(samples.len() / n); components.len()];
+    // Runs of one colour (flat areas) are converted once.
+    let mut last: Option<(&[f32], [f32; 4])> = None;
+    for px in samples.chunks_exact(n) {
+        let tints = match last {
+            Some((seen, tints)) if seen == px => tints,
+            _ => {
+                let tints = crate::color::space_ink_tints(color_space, px, false, target)?;
+                last = Some((px, tints));
+                tints
+            }
+        };
+        for (ink, c) in inks.iter_mut().zip(components) {
+            ink.push(tints.get(*c).copied().unwrap_or(0.0));
+        }
+    }
+    Some(inks)
 }
 
 /// `data`, one ink's grays or, when `rgb`, three inks' RGB, as the decoded image with `obj`'s alpha.

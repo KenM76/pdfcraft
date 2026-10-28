@@ -125,8 +125,8 @@ impl RasterImage<'_> {
 
     /// PdfCraft patch (75): like [`Self::with_ink`] for an image the document's output intent
     /// proofs, with the inks `components` (0..4, C M Y K) as that profile prints them: one ink
-    /// as a gray, three as RGB, each `1 − tint`. `false`, and `func` isn't called, for any
-    /// other image.
+    /// as a gray, three as RGB, each `1 − tint`. A `DeviceCMYK`, `Separation` or `DeviceN` image,
+    /// or `Indexed` over `DeviceCMYK`, gives the inks its colours name (patch (76)). `false`, and `func` isn't called, for any other image.
     pub fn with_proofed_inks(
         &self,
         components: &[usize],

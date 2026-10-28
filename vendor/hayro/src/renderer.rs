@@ -2197,7 +2197,8 @@ impl<'a> Device<'a> for Renderer {
                     self.ctx.set_aliasing_threshold(None);
                     return;
                 }
-                // PdfCraft patch (75): an image the output intent proofs takes its inks from it.
+                // PdfCraft patch (75): an image the output intent proofs takes its inks from it;
+                // patch (76): a `DeviceCMYK`, `Separation` or `DeviceN` one the inks it names.
                 let proofed_inks: Option<&[usize]> = match self.ink.pass {
                     Some(InkPass::Cmy) => Some(&[0, 1, 2]),
                     Some(InkPass::K) => Some(&[3]),
