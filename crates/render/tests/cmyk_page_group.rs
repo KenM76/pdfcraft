@@ -93,8 +93,8 @@ fn a_blend_mode_anywhere_on_a_cmyk_page_blends_in_cmyk() {
 }
 
 /// Controls: an RGB page group, and no page group, blend in RGB as before, so the blend is not
-/// the green ink of the reference square; a CMYK page with an image, which the passes don't
-/// cover yet, is drawn as before, the same as the RGB page, and so is a knockout page group.
+/// the green ink of the reference square; a CMYK page with a stencil mask, which the passes
+/// don't cover yet, is drawn as before, the same as the RGB page, and so is a knockout page group.
 #[test]
 fn pages_that_dont_blend_in_cmyk_are_drawn_as_before() {
     for cs in [Some("/DeviceRGB"), None] {
@@ -103,8 +103,8 @@ fn pages_that_dont_blend_in_cmyk_are_drawn_as_before() {
         assert!(!close(blended, reference), "{cs:?}: blended in RGB, yet green ink {blended:?}");
     }
 
-    // Content the CMYK passes don't cover yet: an image.
-    let content = format!("{BLEND} q 5 0 0 5 0 0 cm BI /W 1 /H 1 /CS /DeviceRGB /BPC 8 /F /AHx ID ff0000> EI Q");
+    // Content the CMYK passes don't cover yet: a stencil mask.
+    let content = format!("{BLEND} q 1 0 0 rg 5 0 0 5 0 0 cm BI /W 1 /H 1 /IM true /BPC 1 /F /AHx ID 00> EI Q");
     assert_eq!(render(Some("/DeviceCMYK"), &content).rgba, render(Some("/DeviceRGB"), &content).rgba);
 
     // A knockout page group is not drawn in the CMYK passes.

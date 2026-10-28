@@ -1445,6 +1445,14 @@ impl Color {
     }
 }
 
+/// PdfCraft patch (70): an 8-bit sRGB pixel as process ink tints `[C, M, Y, K]` (0 = no ink),
+/// the ink that draws back to it through the CMYK profile, as for an additive colour (patch
+/// (69)); for an image drawn into a `DeviceCMYK` blending space. `None` when the profile
+/// can't be evaluated.
+pub fn srgb8_ink_tints(rgb: [u8; 3]) -> Option<[f32; 4]> {
+    crate::cmyk_inverse::srgb_to_cmyk(rgb.map(|v| f32::from(v) / 255.0))
+}
+
 /// PdfCraft patch (70): `input`, 8-bit `DeviceCMYK` pixels (four bytes each), converted to
 /// 8-bit sRGB in `output` (three bytes each) through the CMYK profile pages are drawn with,
 /// so a colour blended in CMYK lands where the same colour painted directly does.

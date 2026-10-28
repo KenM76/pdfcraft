@@ -518,6 +518,50 @@ impl InkState {
     }
 }
 
+/// PdfCraft patch (70): the most distinct colours an image drawn in an ink pass converts; each
+/// is a Newton solve through the CMYK profile. A busier image declines the pass.
+const MAX_INK_IMAGE_COLOURS: usize = 1 << 16;
+
+/// PdfCraft patch (70): `image`, already converted to sRGB, as ink pass `pass` paints it: each
+/// pixel's ink tints (`hayro_interpret::color::srgb8_ink_tints`, gray as black ink alone, ISO
+/// 32000-2 §10.4.2.2) complemented into the pass's colour, as [`InkState::paint`] does for a
+/// solid colour. `None` past [`MAX_INK_IMAGE_COLOURS`] or when the profile can't be evaluated.
+fn ink_image(image: ImageData, pass: InkPass) -> Option<ImageData> {
+    let to_byte = |t: f32| (255.0 - t.clamp(0.0, 1.0) * 255.0).round() as u8;
+    match image {
+        ImageData::Luma(mut l) => {
+            // Gray is black ink alone: the CMY pass paints no ink, the K pass the gray itself.
+            if pass == InkPass::Cmy {
+                l.data.iter_mut().for_each(|v| *v = 255);
+            }
+            Some(ImageData::Luma(l))
+        }
+        ImageData::Rgb(mut r) => {
+            let mut seen: HashMap<[u8; 3], [u8; 3]> = HashMap::default();
+            for px in r.data.as_chunks_mut::<3>().0 {
+                let key = *px;
+                let out = match seen.get(&key) {
+                    Some(out) => *out,
+                    None => {
+                        if seen.len() >= MAX_INK_IMAGE_COLOURS {
+                            return None;
+                        }
+                        let [c, m, y, k] = hayro_interpret::color::srgb8_ink_tints(key)?;
+                        let out = match pass {
+                            InkPass::Cmy => [to_byte(c), to_byte(m), to_byte(y)],
+                            InkPass::K => [to_byte(k); 3],
+                        };
+                        seen.insert(key, out);
+                        out
+                    }
+                };
+                *px = out;
+            }
+            Some(ImageData::Rgb(r))
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum ImagePixelFormat {
     Luma,
@@ -1707,9 +1751,9 @@ impl Renderer {
 
 impl<'a> Device<'a> for Renderer {
     fn draw_image(&mut self, image: hayro_interpret::Image<'a, '_>, mut transform: Affine) {
-        // PdfCraft patch (27): an image's pixels are converted to RGB before they reach the
-        // device, so an ink pass has no tints for them; the group is drawn as before.
-        if self.ink.pass.is_some() {
+        // PdfCraft patch (27): a stencil mask's paint is not yet drawn in an ink pass; the group
+        // is drawn as before. A raster image is (patch (70), below).
+        if self.ink.pass.is_some() && matches!(image, hayro_interpret::Image::Stencil(_)) {
             self.ink.unsupported = true;
             return;
         }
@@ -1875,6 +1919,17 @@ impl<'a> Device<'a> for Renderer {
                 r.with_rgba(
                     |image, alpha| {
                         let (sx, sy) = image.scale_factors();
+                        // PdfCraft patch (70): in an ink pass the pixels become the pass's tints.
+                        let image = match self.ink.pass {
+                            Some(pass) => match ink_image(image, pass) {
+                                Some(image) => image,
+                                None => {
+                                    self.ink.unsupported = true;
+                                    return;
+                                }
+                            },
+                            None => image,
+                        };
                         transform *= Affine::scale_non_uniform(sx as f64, sy as f64);
                         self.ctx.set_transform(transform);
                         self.draw_image(image, alpha);

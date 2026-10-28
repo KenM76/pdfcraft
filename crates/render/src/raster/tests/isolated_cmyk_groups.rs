@@ -88,10 +88,10 @@ endstream endobj
         assert!(distance(&group, &square) <= 3, "{mode}: group {group:?}, square {square:?}");
     }
 
-    // A group whose contents have no ink tints (here the second element draws an RGB image
-    // over the page) is composited in RGB exactly as before: the same as a group blending
-    // in DeviceRGB.
-    let image = |_: [f32; 4]| "q 370 0 0 60 0 0 cm BI /W 1 /H 1 /CS /DeviceRGB /BPC 8 /F /AHx ID ff0000> EI Q".to_string();
+    // A group whose contents cannot be drawn as ink tints (here the second element paints a
+    // stencil mask over the page) is composited in RGB exactly as before: the same as a group
+    // blending in DeviceRGB.
+    let image = |_: [f32; 4]| "q 1 0 0 rg 370 0 0 60 0 0 cm BI /W 1 /H 1 /IM true /BPC 1 /F /AHx ID 00> EI Q".to_string();
     let cmyk_group = render("/CS /DeviceCMYK /I true", &image);
     let rgb_group = render("/CS /DeviceRGB /I true", &image);
     assert_eq!(cmyk_group.rgba, rgb_group.rgba, "contents without tints are drawn as before");
@@ -280,4 +280,42 @@ fn the_color_blend_mode_over_an_empty_cmyk_group_keeps_every_k_level() {
         }
     }
     assert!(wrong.is_empty(), "K levels drawn wrong (level, plain, blended): {wrong:?}");
+}
+
+/// Vendored hayro patch (70): a raster image in an isolated `DeviceCMYK` group made the group
+/// fall back to blending in RGB, as an ink pass had no tints for its pixels. An image's pixels
+/// now become ink tints as a solid colour of the same RGB does, so an RGB image under a
+/// Difference-blended black blends like a fill of its colour: in CMYK, red under black gives
+/// cyan; blended in RGB it would give a different colour.
+#[test]
+fn images_in_isolated_cmyk_groups_blend_in_cmyk() {
+    let render = |under: &str| {
+        let group = format!("{under} /Diff gs 0 0 0 1 k 0 0 100 100 re f");
+        let pdf = format!(
+            "%PDF-1.7
+1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj
+2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj
+3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Contents 4 0 R /Resources << /XObject << /X0 5 0 R >> >> >> endobj
+4 0 obj << /Length 7 >> stream
+/X0 Do
+endstream endobj
+5 0 obj << /Type /XObject /Subtype /Form /BBox [0 0 100 100] /Group << /S /Transparency /CS /DeviceCMYK /I true >> /Resources << /XObject << /Im 6 0 R >> /ExtGState << /Diff << /BM /Difference >> >> >> /Length {} >> stream
+{group}
+endstream endobj
+6 0 obj << /Type /XObject /Subtype /Image /Width 2 /Height 2 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /ASCIIHexDecode /Length 25 >> stream
+FF0000FF0000FF0000FF0000>
+endstream endobj
+trailer << /Root 1 0 R >>
+%%EOF",
+            group.len()
+        );
+        let mut r = PageRenderer::new(Arc::new(pdf.into_bytes()), RenderConfig::default());
+        let p = r.render(RenderRequest { page: 0, kind: RequestKind::Pixels, tile: None, scale: 1.0, tag: 0, ..Default::default() });
+        assert!(p.error.is_none(), "{:?}", p.error);
+        p.rgba[((50 * p.width + 50) * 4) as usize..][..3].to_vec()
+    };
+    let image = render("q 100 0 0 100 0 0 cm /Im Do Q");
+    let fill = render("1 0 0 rg 0 0 100 100 re f");
+    let distance = image.iter().zip(&fill).map(|(a, b)| a.abs_diff(*b)).max().unwrap_or(0);
+    assert!(distance <= 3, "image {image:?}, fill {fill:?}");
 }
