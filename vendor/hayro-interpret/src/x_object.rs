@@ -1004,7 +1004,23 @@ fn decode_raster(
             }
         }
 
-        rgb_data.map(ImageData::Rgb)
+        // PdfCraft patch (78): a `DeviceGray` image stays gray at any depth or decode, as the
+        // 8-bit path above returns it, so an ink pass draws it as black ink alone (§10.4.2.2)
+        // instead of the four inks of its RGB. Four transfer functions can split the channels.
+        let four = matches!(obj.transfer_function, Some(ActiveTransferFunction::Four(_)));
+        if ctx.color_space.is_device_gray() && !four {
+            rgb_data.map(|rgb| {
+                ImageData::Luma(LumaData {
+                    data: rgb.data.iter().step_by(3).copied().collect(),
+                    width: rgb.width,
+                    height: rgb.height,
+                    interpolate: rgb.interpolate,
+                    scale_factors: rgb.scale_factors,
+                })
+            })
+        } else {
+            rgb_data.map(ImageData::Rgb)
+        }
     };
 
     let mut image = image_data?;
