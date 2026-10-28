@@ -27,7 +27,7 @@ fn render(opm: u8, top: &str, refs: &str) -> RenderedPage {
         format!(
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 100] /Contents 4 0 R \
              /Group << /S /Transparency /CS /DeviceCMYK /I true >> \
-             /Resources << /ExtGState << /GS << /OP true /op true /OPM {opm} >> >> \
+             /Resources << /ExtGState << /GS << /OP true /op true /OPM {opm} >> \n             /Hue << /BM /Hue >> /Sat << /BM /Saturation >> /Col << /BM /Color >> /Lum << /BM /Luminosity >> >> \
              /ColorSpace << /S {SPOT} /I [/Indexed {SPOT} 1 <00FF>] >> \
              /Shading << /Sh << /ShadingType 2 /ColorSpace {SPOT} /Coords [0 0 300 0] \
              /Function << /FunctionType 2 /Domain [0 1] /C0 [1] /C1 [1] /N 1 >> >> >> >> >>"
@@ -115,4 +115,19 @@ fn an_indexed_colour_over_a_spot_keeps_the_process_inks() {
 #[test]
 fn a_spot_shading_keeps_the_process_inks() {
     assert_spot_overprints("60 10 100 80 re W n /Sh sh");
+}
+
+/// With nothing beneath it, a paint under a nonseparable mode keeps its own colour (ISO 32000-2
+/// §11.4.7), in the per-ink passes as anywhere: each square must match the same paint drawn
+/// normally. vello_cpu's `clip_color` once turned some of these grays black.
+#[test]
+fn a_nonseparable_mode_over_nothing_keeps_the_paints_colour() {
+    for mode in ["Hue", "Sat", "Col", "Lum"] {
+        for paint in ["0 0 0 0.04 k", "0 0 0 0.5 k", "0 0 0 0.96 k", "0.04 0.04 0.04 0 k", "0.3 0.6 0.1 0.2 k"] {
+            let refs = format!("{paint} 160 30 30 40 re f q /{mode} gs {paint} 210 30 30 40 re f Q");
+            let page = render(0, "", &refs);
+            let (normal, blended) = (at(&page, 175, 50), at(&page, 225, 50));
+            assert!(close(normal, blended), "/{mode} `{paint}`: {blended:?}, drawn normally {normal:?}");
+        }
+    }
 }
