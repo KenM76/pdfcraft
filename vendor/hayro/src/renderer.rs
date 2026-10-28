@@ -1751,12 +1751,6 @@ impl Renderer {
 
 impl<'a> Device<'a> for Renderer {
     fn draw_image(&mut self, image: hayro_interpret::Image<'a, '_>, mut transform: Affine) {
-        // PdfCraft patch (27): a stencil mask's paint is not yet drawn in an ink pass; the group
-        // is drawn as before. A raster image is (patch (70), below).
-        if self.ink.pass.is_some() && matches!(image, hayro_interpret::Image::Stencil(_)) {
-            self.ink.unsupported = true;
-            return;
-        }
         // PdfCraft patch (22): an erase pass paints nothing; an unmasked image's rectangle was
         // cleared by `knockout_shape`, and a masked image's shape is left alone.
         if self.erasing {
@@ -1786,7 +1780,14 @@ impl<'a> Device<'a> for Renderer {
                         let paint = &self.replaced(paint, false);
                         match paint {
                             Paint::Color(c) => {
-                                let color = c.to_rgba().to_rgba8();
+                                // PdfCraft patch (70): in an ink pass a stencil paints the
+                                // pass's tints of its colour, like a fill.
+                                let color = match self.ink.pass {
+                                    Some(pass) => {
+                                        self.ink.paint(pass, c).to_rgba8().to_u8_array()
+                                    }
+                                    None => c.to_rgba().to_rgba8(),
+                                };
                                 let (rgb_bytes, alpha) = (
                                     stencil
                                         .data
@@ -1828,6 +1829,11 @@ impl<'a> Device<'a> for Renderer {
                                 self.ctx.set_fill_rule(old_rule);
                             }
                             Paint::Pattern(_) => {
+                                // PdfCraft patch (21): an ink pass has no tints for a pattern.
+                                if self.ink.pass.is_some() {
+                                    self.ink.unsupported = true;
+                                    return;
+                                }
                                 let (width, height) = (self.ctx.width(), self.ctx.height());
                                 let stencil_rect = Rect::new(
                                     0.0,

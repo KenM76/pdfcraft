@@ -46,7 +46,7 @@ fn isolated_groups_blend_in_device_cmyk() {
             for (k, paint) in [(n, tint(*ta)), (n + 1, b(*tb))] {
                 let body = format!("{paint} {rect}");
                 objects += &format!(
-                    "{k} 0 obj << /Type /XObject /Subtype /Form /BBox [{x} 10 {} 50] /Group << /S /Transparency /CS /DeviceCMYK >> /Length {} >> stream\n{body}\nendstream endobj\n",
+                    "{k} 0 obj << /Type /XObject /Subtype /Form /BBox [{x} 10 {} 50] /Group << /S /Transparency /CS /DeviceCMYK >> /Resources << /Pattern << /P << /PatternType 2 /Shading << /ShadingType 2 /ColorSpace /DeviceRGB /Coords [0 0 1 0] /Function << /FunctionType 2 /Domain [0 1] /C0 [1 0 0] /C1 [0 0 1] /N 1 >> >> >> >> >> /Length {} >> stream\n{body}\nendstream endobj\n",
                     x + 40,
                     body.len()
                 );
@@ -88,12 +88,12 @@ endstream endobj
         assert!(distance(&group, &square) <= 3, "{mode}: group {group:?}, square {square:?}");
     }
 
-    // A group whose contents cannot be drawn as ink tints (here the second element paints a
-    // stencil mask over the page) is composited in RGB exactly as before: the same as a group
-    // blending in DeviceRGB.
-    let image = |_: [f32; 4]| "q 1 0 0 rg 370 0 0 60 0 0 cm BI /W 1 /H 1 /IM true /BPC 1 /F /AHx ID 00> EI Q".to_string();
-    let cmyk_group = render("/CS /DeviceCMYK /I true", &image);
-    let rgb_group = render("/CS /DeviceRGB /I true", &image);
+    // A group whose contents have no ink tints (here the second element is filled with a
+    // shading pattern) is composited in RGB exactly as before: the same as a group blending in
+    // DeviceRGB.
+    let pattern = |_: [f32; 4]| "/Pattern cs /P scn".to_string();
+    let cmyk_group = render("/CS /DeviceCMYK /I true", &pattern);
+    let rgb_group = render("/CS /DeviceRGB /I true", &pattern);
     assert_eq!(cmyk_group.rgba, rgb_group.rgba, "contents without tints are drawn as before");
 }
 
@@ -282,13 +282,13 @@ fn the_color_blend_mode_over_an_empty_cmyk_group_keeps_every_k_level() {
     assert!(wrong.is_empty(), "K levels drawn wrong (level, plain, blended): {wrong:?}");
 }
 
-/// Vendored hayro patch (70): a raster image in an isolated `DeviceCMYK` group made the group
-/// fall back to blending in RGB, as an ink pass had no tints for its pixels. An image's pixels
-/// now become ink tints as a solid colour of the same RGB does, so an RGB image under a
-/// Difference-blended black blends like a fill of its colour: in CMYK, red under black gives
-/// cyan; blended in RGB it would give a different colour.
+/// Vendored hayro patch (70): a raster image or a stencil mask in an isolated `DeviceCMYK`
+/// group made the group fall back to blending in RGB, as an ink pass had no tints for it. An
+/// image's pixels now become ink tints as a solid colour of the same RGB does, and a stencil
+/// paints the tints of its colour, so under a Difference-blended black each blends like a fill
+/// of its colour: in CMYK, red under black gives cyan; blended in RGB it would not.
 #[test]
-fn images_in_isolated_cmyk_groups_blend_in_cmyk() {
+fn images_and_stencils_in_isolated_cmyk_groups_blend_in_cmyk() {
     let render = |under: &str| {
         let group = format!("{under} /Diff gs 0 0 0 1 k 0 0 100 100 re f");
         let pdf = format!(
@@ -314,8 +314,11 @@ trailer << /Root 1 0 R >>
         assert!(p.error.is_none(), "{:?}", p.error);
         p.rgba[((50 * p.width + 50) * 4) as usize..][..3].to_vec()
     };
-    let image = render("q 100 0 0 100 0 0 cm /Im Do Q");
     let fill = render("1 0 0 rg 0 0 100 100 re f");
-    let distance = image.iter().zip(&fill).map(|(a, b)| a.abs_diff(*b)).max().unwrap_or(0);
-    assert!(distance <= 3, "image {image:?}, fill {fill:?}");
+    let image = render("q 100 0 0 100 0 0 cm /Im Do Q");
+    let stencil = render("q 1 0 0 rg 100 0 0 100 0 0 cm BI /W 1 /H 1 /IM true /BPC 1 /F /AHx ID 00> EI Q");
+    for (what, drawn) in [("image", image), ("stencil", stencil)] {
+        let distance = drawn.iter().zip(&fill).map(|(a, b)| a.abs_diff(*b)).max().unwrap_or(0);
+        assert!(distance <= 3, "{what} {drawn:?}, fill {fill:?}");
+    }
 }
