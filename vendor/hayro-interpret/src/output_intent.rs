@@ -18,7 +18,7 @@ const MAX_TRANSFORMS: usize = 16;
 #[derive(Clone)]
 enum Source {
     Icc(ICCProfile),
-    /// CIE L\*a\*b\*, given as encoded D50 XYZ (see [`pcs_xyz`]).
+    /// CIE L\*a\*b\*, given as ProPhoto RGB (see [`pro_photo`]).
     Lab,
 }
 
@@ -99,7 +99,7 @@ impl OutputIntent {
     /// `lab`, CIE L\*a\*b\* (L\* 0..=100), as ink tints of the destination profile under
     /// `intent`, for a `Lab` colour painted into a `DeviceCMYK` blending space.
     pub(crate) fn lab_to_ink(&self, intent: RenderingIntent, lab: [f32; 3]) -> Option<[f32; 4]> {
-        self.to_ink(&Source::Lab, intent, pcs_xyz(lab))
+        self.to_ink(&Source::Lab, intent, pro_photo(lab))
     }
 
     /// PdfCraft patch (73): `input`, colours of `src`'s components each, as ink tints of the
@@ -140,7 +140,7 @@ impl OutputIntent {
         let (profile, layout) = match src {
             Source::Icc(icc) => (icc.src_profile(), icc.layout()),
             Source::Lab => {
-                lab = ColorProfile::new_lab();
+                lab = ColorProfile::new_pro_photo_rgb();
                 (&lab, Layout::Rgb)
             }
         };
@@ -167,9 +167,11 @@ impl OutputIntent {
 /// connection space is D50).
 const D50: [f32; 3] = [0.9642, 1.0, 0.8249];
 
-/// `lab` as D50 XYZ in the ICC connection space's encoding (1.0 = 65535/32768), which is what
-/// moxcms's generic Lab profile, an identity into an XYZ connection space, takes as input.
-fn pcs_xyz([l, a, b]: [f32; 3]) -> [f32; 3] {
+/// PdfCraft patch (79): `lab` as ProPhoto RGB, whose D50 white and gamut hold nearly every
+/// colour `Lab` can name; the rare one outside is clipped. moxcms's own Lab source profile
+/// gives a different ink from the destination's tables (a neutral `60 0 0` loses a sixth of
+/// its black), while a matrix RGB source converts as other colour engines do.
+fn pro_photo([l, a, b]: [f32; 3]) -> [f32; 3] {
     let fy = (l + 16.0) / 116.0;
     let fx = fy + a / 500.0;
     let fz = fy - b / 200.0;
@@ -181,5 +183,19 @@ fn pcs_xyz([l, a, b]: [f32; 3]) -> [f32; 3] {
         }
     };
     let [wx, wy, wz] = D50;
-    [g(fx) * wx, g(fy) * wy, g(fz) * wz].map(|v| v * (32768.0 / 65535.0))
+    let xyz = [g(fx) * wx, g(fy) * wy, g(fz) * wz];
+    // D50 XYZ to linear ProPhoto (ROMM) RGB, then its 1.8 gamma.
+    const TO_RGB: [[f32; 3]; 3] = [
+        [1.345_943_3, -0.255_607_5, -0.051_111_8],
+        [-0.544_598_9, 1.508_167_3, 0.020_535_1],
+        [0.0, 0.0, 1.211_812_8],
+    ];
+    TO_RGB.map(|row| {
+        let v = row[0] * xyz[0] + row[1] * xyz[1] + row[2] * xyz[2];
+        if v.is_finite() {
+            v.clamp(0.0, 1.0).powf(1.0 / 1.8)
+        } else {
+            0.0
+        }
+    })
 }

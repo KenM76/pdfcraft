@@ -102,7 +102,7 @@ fn render_in(profile: Option<Vec<u8>>, group: &str, states: &str, reference: &st
     let objects: Vec<Vec<u8>> = vec![
         format!("<< /Type /Catalog /Pages 2 0 R {intents} >>").into_bytes(),
         b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
-        format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Contents 4 0 R {group} /Resources << /ExtGState << {states} >> /ColorSpace << /CS0 [/ICCBased 5 0 R] >> /XObject << /Im0 6 0 R /Im1 8 0 R >> >> >>").into_bytes(),
+        format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Contents 4 0 R {group} /Resources << /ExtGState << {states} >> /ColorSpace << /CS0 [/ICCBased 5 0 R] /L [/Lab << /WhitePoint [0.9642 1 0.8249] >>] >> /XObject << /Im0 6 0 R /Im1 8 0 R >> >> >>").into_bytes(),
         stream("", body.as_bytes()),
         stream("/N 3", &srgb_profile()),
         stream("/Type /XObject /Subtype /Image /Width 1 /Height 1 /BitsPerComponent 8 /ColorSpace [/ICCBased 5 0 R]", &[0, 0, 255]),
@@ -193,4 +193,31 @@ fn in_a_blending_cmyk_page_group_an_icc_image_prints_the_output_intents_ink() {
 #[test]
 fn in_an_overprinting_cmyk_page_group_an_icc_image_prints_the_output_intents_ink() {
     assert_prints_green("/OP << /OP true /op true >>");
+}
+
+/// `Lab` neutrals (L\*) with sRGB's grey of each: the same colour, so the same ink.
+const LAB_GREYS: [(u8, f32); 2] = [(20, 0.1902), (60, 0.5647)];
+
+/// A `Lab` colour painted into a `DeviceCMYK` page group deposits the ink the output intent
+/// gives it (patch (79)): converted through moxcms's Lab profile, darker neutrals came out as
+/// a lighter ink.
+fn assert_lab_prints_its_ink(states: &str) {
+    for (l, grey) in LAB_GREYS {
+        let [c, m, y, k] = ink([grey; 3]);
+        let reference = format!("{c:.4} {m:.4} {y:.4} {k:.4} k 10 10 80 80 re f");
+        let content = format!("/L cs {l} 0 0 sc 110 10 80 80 re f");
+        let page = render_in(Some(output_profile()), CMYK_GROUP, states, &reference, &content);
+        let (reference, drawn) = (at(&page, 50, 50), at(&page, 150, 50));
+        assert!(close(drawn, reference), "{states} L* {l}: drawn {drawn:?}, reference {reference:?}");
+    }
+}
+
+#[test]
+fn in_a_blending_cmyk_page_group_a_lab_colour_prints_the_output_intents_ink() {
+    assert_lab_prints_its_ink("/BM << /BM /Multiply >>");
+}
+
+#[test]
+fn in_an_overprinting_cmyk_page_group_a_lab_colour_prints_the_output_intents_ink() {
+    assert_lab_prints_its_ink("/OP << /OP true /op true >>");
 }
