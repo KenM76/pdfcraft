@@ -31,3 +31,6 @@ getrandom = { version = "0.4", features = ["wasm_js"] }
 skrifa = "0.44"
 # Builds the decompression-bomb streams in the raster tests.
 flate2 = { workspace = true }
+# Builds the ICC profiles and expected inks in the output-intent tests; the version the
+# vendored renderer already uses.
+moxcms = "0.8.1"
