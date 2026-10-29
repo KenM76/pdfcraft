@@ -35,6 +35,13 @@ fn render(opm: u8, top: &str, refs: &str) -> RenderedPage {
         .into_bytes(),
         stream("", &body),
     ];
+    let page = render_objects(&objects);
+    assert!(page.error.is_none(), "{top}: {:?}", page.error);
+    page
+}
+
+/// Renders the document whose objects are `objects` (object `i + 1` is `objects[i]`) at scale 1.
+fn render_objects(objects: &[Vec<u8>]) -> RenderedPage {
     let mut bytes = b"%PDF-1.7\n".to_vec();
     let mut offsets = Vec::new();
     for (i, object) in objects.iter().enumerate() {
@@ -50,9 +57,7 @@ fn render(opm: u8, top: &str, refs: &str) -> RenderedPage {
     }
     bytes.extend_from_slice(format!("trailer << /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objects.len() + 1).as_bytes());
     let mut renderer = PageRenderer::new(Arc::new(bytes), RenderConfig::default());
-    let page = renderer.render(RenderRequest { page: 0, scale: 1.0, ..Default::default() });
-    assert!(page.error.is_none(), "{top}: {:?}", page.error);
-    page
+    renderer.render(RenderRequest { page: 0, scale: 1.0, ..Default::default() })
 }
 
 /// The colour at PDF point (x, y).
@@ -130,4 +135,41 @@ fn a_nonseparable_mode_over_nothing_keeps_the_paints_colour() {
             assert!(close(normal, blended), "/{mode} `{paint}`: {blended:?}, drawn normally {normal:?}");
         }
     }
+}
+
+/// A PDF/X-style page (a CMYK output intent, no page group) as InDesign writes a spot image
+/// over a gray one: overprint is set once, outside `q`, a nested state turns it off for the
+/// gray image, and the spot image is drawn after `Q` restores it. The spot ink must print
+/// over the gray image's black ink, not knock it out, so its left half (gray 0.5 beneath)
+/// is darker than its right half (white beneath).
+#[test]
+fn a_spot_image_overprints_a_gray_image_under_an_inherited_state() {
+    let profile = include_bytes!("../../../../vendor/hayro-interpret/assets/CGATS001Compat-v2-micro.icc");
+    let mut icc = format!("<< /N 4 /Length {} >>\nstream\n", profile.len()).into_bytes();
+    icc.extend_from_slice(profile);
+    icc.extend_from_slice(b"\nendstream");
+    let image = |space: &str, width: u8, hex: &str| {
+        let dict = format!("/Type /XObject /Subtype /Image /Width {width} /Height 1 /ColorSpace {space} /BitsPerComponent 8 /Filter /ASCIIHexDecode");
+        stream(&dict, hex)
+    };
+    let objects: Vec<Vec<u8>> = vec![
+        b"<< /Type /Catalog /Pages 2 0 R /OutputIntents [<< /Type /OutputIntent /S /GTS_PDFX \
+          /OutputConditionIdentifier (Synthetic) /DestOutputProfile 6 0 R >>] >>"
+            .to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 100] /Contents 4 0 R \
+          /Resources << /ExtGState << /On << /OP true /op true /OPM 1 >> /Off << /OP false /op false >> >> \
+          /XObject << /Gray 5 0 R /Spot 7 0 R >> >> >>"
+            .to_vec(),
+        stream("", "/On gs q /Off gs 300 0 0 100 0 0 cm /Gray Do Q q 300 0 0 100 0 0 cm /Spot Do Q"),
+        image("/DeviceGray", 2, "80FF>"),
+        icc,
+        image(SPOT, 1, "FF>"),
+    ];
+    let page = render_objects(&objects);
+    assert!(page.error.is_none(), "{:?}", page.error);
+    let (over_gray, alone) = (at(&page, 75, 50), at(&page, 225, 50));
+    let sum = |c: [u8; 3]| c.iter().map(|v| u16::from(*v)).sum::<u16>();
+    let darker = sum(over_gray) + 100 <= sum(alone);
+    assert!(darker, "spot over gray {over_gray:?} should be darker than the spot alone {alone:?}");
 }
