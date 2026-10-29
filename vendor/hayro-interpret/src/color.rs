@@ -1689,13 +1689,13 @@ impl Color {
     }
 }
 
-/// PdfCraft patch (45), widened by (70): colour `c` of `space` as process ink tints
+/// PdfCraft patch (70), widened by (84): colour `c` of `space` as process ink tints
 /// `[C, M, Y, K]` (0 = no ink).
 ///
 /// `DeviceCMYK` and four-component ICCBased give their components, taken as the group's own
 /// process inks. `DeviceGray` and one-component ICCBased are black ink alone, `K = 1 − gray`
 /// (§10.4.2.2). An additive colour (`DeviceRGB`, `CalRGB`, `CalGray`, `Lab`, three-component
-/// ICCBased) is the ink that draws back to it through the CMYK profile (patch (69)). A
+/// ICCBased) is the ink that draws back to it through the CMYK profile (patch (83)). A
 /// Separation for `All` is the tint on every ink (§8.6.6.4); other Separation and DeviceN
 /// colours, and Indexed ones, are the tints of the alternate or base colour they stand for
 /// (`nested` stops a second level, which the spec does not allow). Patch (71): with a
@@ -1763,9 +1763,9 @@ pub(crate) fn space_ink_tints(
     }
 }
 
-/// PdfCraft patch (70): an 8-bit sRGB pixel as process ink tints `[C, M, Y, K]` (0 = no ink),
+/// PdfCraft patch (84): an 8-bit sRGB pixel as process ink tints `[C, M, Y, K]` (0 = no ink),
 /// the ink that draws back to it through the CMYK profile, as for an additive colour (patch
-/// (69)); for an image drawn into a `DeviceCMYK` blending space. `None` when the profile
+/// (83)); for an image drawn into a `DeviceCMYK` blending space. `None` when the profile
 /// can't be evaluated.
 pub fn srgb8_ink_tints(rgb: [u8; 3]) -> Option<[f32; 4]> {
     crate::cmyk_inverse::srgb8_to_cmyk(rgb)

@@ -1,6 +1,6 @@
 //! A page whose group blends in `DeviceCMYK` (ISO 32000-2 §11.3.4) blends its contents in
 //! CMYK: the page group is always isolated (§11.4.7), so it takes the isolated CMYK group's
-//! passes (hayro-interpret patch (68)). Magenta `0 1 0 0 k` under black `0 0 0 1 k` with
+//! passes (hayro-interpret patch (82)). Magenta `0 1 0 0 k` under black `0 0 0 1 k` with
 //! `/BM /Difference` is green `1 0 1 0 k` in CMYK, and stays magenta when blended in RGB.
 //!
 //! Each page has a reference square on the left, painted directly in the CMYK the blend should
@@ -114,7 +114,7 @@ fn pages_that_dont_blend_in_cmyk_are_drawn_as_before() {
 }
 
 /// An RGB colour on a CMYK page is the ink that draws back to it through the CMYK profile
-/// (hayro-interpret patch (69)), compared with what Acrobat draws for the same page.
+/// (hayro-interpret patch (83)), compared with what Acrobat draws for the same page.
 ///
 /// Painted without a blend, a colour inside the profile's gamut draws as itself, black stays
 /// black and pure red is clipped to the profile's red. Under `/BM /Difference` with black ink,

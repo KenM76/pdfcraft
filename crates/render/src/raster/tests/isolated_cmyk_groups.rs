@@ -287,7 +287,7 @@ fn the_color_blend_mode_over_an_empty_cmyk_group_keeps_every_k_level() {
     assert!(wrong.is_empty(), "K levels drawn wrong (level, plain, blended): {wrong:?}");
 }
 
-/// Vendored hayro patch (70): a raster image or a stencil mask in an isolated `DeviceCMYK`
+/// Vendored hayro patch (84): a raster image or a stencil mask in an isolated `DeviceCMYK`
 /// group made the group fall back to blending in RGB, as an ink pass had no tints for it. An
 /// image's pixels now become ink tints as a solid colour of the same RGB does, and a stencil
 /// paints the tints of its colour, so under a Difference-blended black each blends like a fill
@@ -328,7 +328,7 @@ trailer << /Root 1 0 R >>
     }
 }
 
-/// Vendored hayro-interpret patch (70): an image pixel's ink is interpolated from a grid of
+/// Vendored hayro-interpret patch (84): an image pixel's ink is interpolated from a grid of
 /// solves, not solved for each colour; drawn back through the CMYK profile it lands within a
 /// few 8-bit levels of the pixel, across in-gamut colours between the grid points. The grid
 /// is built once, quickly.

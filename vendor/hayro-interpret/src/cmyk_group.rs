@@ -13,7 +13,7 @@
 //! interprets it with [`CmykGroup::interpret`] as often as it needs; every other device, and a
 //! device that declines, gets the group's contents as before.
 //!
-//! PdfCraft patch (68): a page whose group blends in `DeviceCMYK` takes the same path. The page
+//! PdfCraft patch (82): a page whose group blends in `DeviceCMYK` takes the same path. The page
 //! group is always isolated (§11.4.7), so its contents are such a group too, composited onto
 //! the paper after they are converted out of CMYK.
 
@@ -46,7 +46,7 @@ pub struct CmykGroup<'a, 'b> {
     settings: InterpreterSettings,
     xref: &'a XRef,
     nesting_depth: u32,
-    /// Whether a page's contents were charged to its content budget yet (patch (68)).
+    /// Whether a page's contents were charged to its content budget yet (patch (82)).
     charged: Cell<bool>,
     /// PdfCraft patch (72): whether the contents may set overprint.
     overprint: bool,
@@ -55,7 +55,7 @@ pub struct CmykGroup<'a, 'b> {
     blends: bool,
 }
 
-/// What a [`CmykGroup`] draws: a form's contents, or a page's (patch (68)).
+/// What a [`CmykGroup`] draws: a form's contents, or a page's (patch (82)).
 enum Contents<'a, 'b> {
     Form(&'b FormXObject<'a>),
     Page(&'b Page<'a>),
@@ -66,7 +66,7 @@ impl<'a, 'b> CmykGroup<'a, 'b> {
         Self::with(Contents::Form(form), resources, context)
     }
 
-    /// PdfCraft patch (68): the contents of `page`, whose group blends in `DeviceCMYK`.
+    /// PdfCraft patch (82): the contents of `page`, whose group blends in `DeviceCMYK`.
     pub(crate) fn page(page: &'b Page<'a>, context: &Context<'a>, overprint: bool, blends: bool) -> Self {
         Self { overprint, blends, ..Self::with(Contents::Page(page), page.resources(), context) }
     }
@@ -161,21 +161,21 @@ pub(crate) fn names_a_blending_space(form: &Dict<'_>) -> bool {
     form.get::<Dict<'_>>(GROUP).is_some_and(|g| g.contains_key(CS))
 }
 
-/// PdfCraft patch (68): whether `page`'s group is a knockout group (`/K true`), which the CMYK
+/// PdfCraft patch (82): whether `page`'s group is a knockout group (`/K true`), which the CMYK
 /// passes don't draw, as for a form.
 pub(crate) fn page_knocks_out(page: &Page<'_>) -> bool {
     page.raw().get::<Dict<'_>>(GROUP).and_then(|g| g.get::<bool>(K)).unwrap_or(false)
 }
 
-/// PdfCraft patch (68): the most resource dictionaries [`page_blends`] reads (the page's, then
+/// PdfCraft patch (82): the most resource dictionaries [`page_blends`] reads (the page's, then
 /// one per form, tiling pattern or Type 3 font it reaches).
 const MAX_SCANNED_RESOURCES: usize = 512;
-/// PdfCraft patch (68): how deep [`page_blends`] follows forms, patterns and fonts into each other.
+/// PdfCraft patch (82): how deep [`page_blends`] follows forms, patterns and fonts into each other.
 const MAX_SCAN_DEPTH: u32 = 16;
-/// PdfCraft patch (68): the most graphics states and named resources [`page_blends`] looks at.
+/// PdfCraft patch (82): the most graphics states and named resources [`page_blends`] looks at.
 const MAX_SCANNED_ENTRIES: usize = 16_384;
 
-/// PdfCraft patch (68): whether anything `page` draws may use a blend mode other than
+/// PdfCraft patch (82): whether anything `page` draws may use a blend mode other than
 /// `Normal`: some graphics state in its resources (inherited ones too), or in those of a form,
 /// tiling pattern or Type 3 font it reaches, names one. Bounded; a resource tree too large to
 /// read counts as blending.

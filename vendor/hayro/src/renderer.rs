@@ -655,7 +655,7 @@ impl InkState {
     }
 }
 
-/// PdfCraft patch (70): `image`, already converted to sRGB, as ink pass `pass` paints it: each
+/// PdfCraft patch (84): `image`, already converted to sRGB, as ink pass `pass` paints it: each
 /// pixel's ink tints (`hayro_interpret::color::srgb8_ink_tints`, interpolated from a grid of
 /// solves; gray as black ink alone, ISO 32000-2 §10.4.2.2) complemented into the pass's colour,
 /// as [`InkState::paint`] does for a solid colour. `None` when the profile can't be evaluated.
@@ -1494,7 +1494,7 @@ impl Renderer {
         }
     }
 
-    /// PdfCraft patch (21): one ink pass of `group` (see [`InkState`]) on a `width` × `height`
+    /// PdfCraft patch (27): one ink pass of `group` (see [`InkState`]) on a `width` × `height`
     /// canvas whose corner is device point `offset`; `None` when the group holds something the
     /// pass has no tints for.
     fn ink_pass(
@@ -2135,7 +2135,7 @@ impl<'a> Device<'a> for Renderer {
                         let paint = &self.replaced(paint, false);
                         match paint {
                             Paint::Color(c) => {
-                                // PdfCraft patch (70): in an ink pass a stencil paints the
+                                // PdfCraft patch (84): in an ink pass a stencil paints the
                                 // pass's tints of its colour, like a fill.
                                 let color = match self.ink.pass {
                                     Some(pass) => {
@@ -2184,7 +2184,7 @@ impl<'a> Device<'a> for Renderer {
                                 self.ctx.set_fill_rule(old_rule);
                             }
                             Paint::Pattern(_) => {
-                                // PdfCraft patch (21): an ink pass has no tints for a pattern.
+                                // PdfCraft patch (27): an ink pass has no tints for a pattern.
                                 if self.ink.pass.is_some() {
                                     self.ink.unsupported = true;
                                     return;
@@ -2308,7 +2308,7 @@ impl<'a> Device<'a> for Renderer {
                 r.with_rgba(
                     |image, alpha| {
                         let (sx, sy) = image.scale_factors();
-                        // PdfCraft patch (70): in an ink pass the pixels become the pass's tints.
+                        // PdfCraft patch (84): in an ink pass the pixels become the pass's tints.
                         let image = match self.ink.pass {
                             Some(pass) => match ink_image(image, pass) {
                                 Some(image) => image,

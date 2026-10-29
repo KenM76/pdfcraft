@@ -170,7 +170,7 @@ pub fn interpret_page<'a>(
     device: &mut impl Device<'a>,
 ) {
     let resources = page.resources();
-    // PdfCraft patch (68): a page group blending in DeviceCMYK (§11.3.4) is offered to the
+    // PdfCraft patch (82): a page group blending in DeviceCMYK (§11.3.4) is offered to the
     // device like an isolated CMYK group, since the page group is isolated (§11.4.7). Only
     // when its contents use a blend mode, where the two spaces differ most; every other CMYK
     // page keeps a single pass.
@@ -1067,7 +1067,7 @@ pub fn interpret<'a>(
 /// at its end is incomplete.
 const CONTENT_WINDOW: usize = 64 << 10;
 
-/// The page's own contents, without its annotations (PdfCraft patch (68): shared with
+/// The page's own contents, without its annotations (PdfCraft patch (82): shared with
 /// [`crate::cmyk_group::CmykGroup::interpret`]). `charge` counts them against the page's
 /// content budget; a page interpreted more than once is charged once.
 pub(crate) fn interpret_page_contents<'a>(

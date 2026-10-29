@@ -1,4 +1,4 @@
-//! PdfCraft patch (69): an sRGB colour as the process ink that draws back to it through the
+//! PdfCraft patch (83): an sRGB colour as the process ink that draws back to it through the
 //! CMYK profile pages are drawn with, for an additive colour painted into a `DeviceCMYK`
 //! blending space (ISO 32000-2 §11.3.4).
 //!
@@ -65,7 +65,7 @@ thread_local! {
 /// Grid points per channel of [`INK_GRID`].
 const GRID: usize = 33;
 
-/// PdfCraft patch (70): [`srgb_to_cmyk`] solved once at `GRID`³ evenly spaced sRGB colours, so
+/// PdfCraft patch (84): [`srgb_to_cmyk`] solved once at `GRID`³ evenly spaced sRGB colours, so
 /// an image's pixels are inked by interpolation instead of a solve each. `None` entries are
 /// colours the solve failed for.
 static INK_GRID: LazyLock<Vec<Option<[f32; 4]>>> = LazyLock::new(|| {
@@ -81,7 +81,7 @@ static INK_GRID: LazyLock<Vec<Option<[f32; 4]>>> = LazyLock::new(|| {
     grid
 });
 
-/// PdfCraft patch (70): the process ink for an 8-bit sRGB pixel, trilinearly interpolated
+/// PdfCraft patch (84): the process ink for an 8-bit sRGB pixel, trilinearly interpolated
 /// from [`INK_GRID`]; solved directly when a surrounding grid point has no ink.
 pub(crate) fn srgb8_to_cmyk(rgb: [u8; 3]) -> Option<[f32; 4]> {
     let cells = (GRID - 1) as f32;
