@@ -1,3 +1,4 @@
+use super::super::interp::TextState;
 use super::grouping::{across, is_centred, row_rect};
 use super::{
     BlockStyle, CraftFont, Dict, Document, EditError, HashMap, LineEdit, MAX_TYPE3_GLYPHS, Matrix, Metrics, Object, Op, PdfString, Pieces,
@@ -783,6 +784,12 @@ pub(crate) fn rewrite_styled_block(
     let o = &lead.origin;
     // What is in force where the rewrite is drawn, and what the text after it expects.
     let after = if split { &o.state } else { &o.bt_state };
+    let at = if split { start } else { o.bt_op };
+    // Revealed OCR text that something is painted over goes on top of the page, where it starts
+    // from the initial state.
+    let over = crate::revealed_under_paint(block.invisible, &ops, at);
+    let initial = TextState::initial();
+    let drawn_from = if over { &initial } else { after };
     validate_contextual_rows(&rows, &kept)?;
     let measured: Vec<_> = rows.iter().map(|row| measure(row)).collect::<Result<_, _>>()?;
     let shaped = prepare_shaped_rows(doc, &fonts, &rows, &kept, advance)?;
@@ -869,7 +876,7 @@ pub(crate) fn rewrite_styled_block(
             // object (`gs`, stroke, line width, `Tr`; #3508/#3509) from the state the rewrite is
             // drawn in: a `gs` has no inverse, so one run's ExtGState would stay for the next.
             block_ops.push(Op::new("q", vec![]));
-            block_ops.extend(state.paint_ops(after));
+            block_ops.extend(state.paint_ops(drawn_from));
             if let Some((_, shaped, _)) = shaped_runs.get(&(row_index, pos)) {
                 let resource = glyph_resources.get(&(row_index, pos)).ok_or_else(|| EditError::Invalid("shaped font is missing".into()))?;
                 let mut properties = Dict::new();
@@ -967,13 +974,13 @@ pub(crate) fn rewrite_styled_block(
         };
     }
     block_ops.push(Op::new("Q", vec![]));
+    let on_top = crate::lift_on_top(doc, &p, over, &mut block_ops)?;
     block_ops.extend(after.ops());
     if split {
         block_ops.insert(0, Op::new("ET", vec![]));
         block_ops.push(Op::new("BT", vec![]));
         block_ops.push(Op::new("Tm", o.tlm.iter().map(|v| n(*v)).collect()));
     }
-    let at = if split { start } else { o.bt_op };
     let data = splice(&pieces, &ops, |i| (if i == at { std::mem::take(&mut block_ops) } else { Vec::new() }, !drop.contains(&i)));
     let contents = rewritten_contents(doc, &streams, data);
     res.set(b"Font".to_vec(), Object::Dict(fonts));
@@ -981,5 +988,6 @@ pub(crate) fn rewrite_styled_block(
         d.set(b"Contents".to_vec(), contents);
         d.set(b"Resources".to_vec(), Object::Dict(res));
     })?;
+    crate::draw_on_top(doc, &p, o.ctm, &on_top)?;
     Ok(LineEdit { substituted })
 }

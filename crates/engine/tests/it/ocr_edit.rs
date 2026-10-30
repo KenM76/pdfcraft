@@ -207,3 +207,84 @@ fn visible_stretched_text_rewrites_unchanged() {
     let i = ((y * out.width + x) * 4) as usize;
     assert_eq!(&out.rgba[i..i + 3], &[255, 255, 255]);
 }
+
+/// A scan whose OCR layer is drawn first and the opaque page image over it, as some OCR tools
+/// write it (#3973): invisible Helvetica `text` on the scanned word, then the image.
+fn ocr_under_scan(text: &str) -> std::sync::Arc<Vec<u8>> {
+    use pdfcraft_cos::{Dict, Document, Object, SaveOptions, Stream};
+    let (w, h) = (200u32, 100u32);
+    let mut rgb = Vec::new();
+    for y in 0..h {
+        for x in 0..w {
+            let ink = (WORD[0]..WORD[2]).contains(&x) && (WORD[1]..WORD[3]).contains(&y);
+            rgb.extend(if ink { INK } else { PAPER });
+        }
+    }
+    let mut d = Document::new_empty();
+    let pages = d.add(Object::Dict(Dict::new()));
+    let content = format!("BT /F1 20 Tf 3 Tr 42 44 Td ({text}) Tj ET q 200 0 0 100 0 0 cm /Im Do Q");
+    let contents = d.add(Object::Stream(Stream::flate(Dict::new(), content.as_bytes())));
+    let mut image = Dict::new();
+    image.set(b"Type".to_vec(), Object::name("XObject"));
+    image.set(b"Subtype".to_vec(), Object::name("Image"));
+    image.set(b"Width".to_vec(), Object::Int(i64::from(w)));
+    image.set(b"Height".to_vec(), Object::Int(i64::from(h)));
+    image.set(b"ColorSpace".to_vec(), Object::name("DeviceRGB"));
+    image.set(b"BitsPerComponent".to_vec(), Object::Int(8));
+    let image = d.add(Object::Stream(Stream::flate(image, &rgb)));
+    let mut font = Dict::new();
+    font.set(b"Type".to_vec(), Object::name("Font"));
+    font.set(b"Subtype".to_vec(), Object::name("Type1"));
+    font.set(b"BaseFont".to_vec(), Object::name("Helvetica"));
+    let mut fonts = Dict::new();
+    fonts.set(b"F1".to_vec(), Object::Dict(font));
+    let mut xobjects = Dict::new();
+    xobjects.set(b"Im".to_vec(), Object::Ref(image));
+    let mut res = Dict::new();
+    res.set(b"Font".to_vec(), Object::Dict(fonts));
+    res.set(b"XObject".to_vec(), Object::Dict(xobjects));
+    let mut p = Dict::new();
+    p.set(b"Type".to_vec(), Object::name("Page"));
+    p.set(b"Parent".to_vec(), Object::Ref(pages));
+    p.set(b"Contents".to_vec(), Object::Ref(contents));
+    p.set(b"Resources".to_vec(), Object::Dict(res));
+    p.set(b"MediaBox".to_vec(), Object::Array([0, 0, 200, 100].map(Object::Int).to_vec()));
+    let page = d.add(Object::Dict(p));
+    d.update_dict(pages, |p| {
+        p.set(b"Type".to_vec(), Object::name("Pages"));
+        p.set(b"Kids".to_vec(), Object::Array(vec![Object::Ref(page)]));
+        p.set(b"Count".to_vec(), Object::Int(1));
+    })
+    .unwrap();
+    let mut root = Dict::new();
+    root.set(b"Type".to_vec(), Object::name("Catalog"));
+    root.set(b"Pages".to_vec(), Object::Ref(pages));
+    let root = d.add(Object::Dict(root));
+    d.trailer_mut().set(b"Root".to_vec(), Object::Ref(root));
+    std::sync::Arc::new(pdfcraft_cos::write_full(&d, &SaveOptions::default()).unwrap())
+}
+
+/// The OCR layer is under the scan image: the rewritten paragraph is drawn on top of the image,
+/// not in the OCR text's place where the image would hide it (#3973). One line takes the
+/// single-style rewrite, a typed line break the styled one.
+#[test]
+fn an_ocr_layer_under_the_scan_image_shows_its_edit() {
+    for edit in ["Jane", "Jane\nDoe"] {
+        let mut s = Session::new();
+        let id = s.open("ocr-under-scan.pdf", None, ocr_under_scan("John"), None).unwrap();
+        let blocks = s.get(id).unwrap().text_blocks(0);
+        assert_eq!(blocks.len(), 1);
+        assert!(blocks[0].invisible, "the OCR layer is invisible text");
+        assert!(word_pixels(&s, id).iter().all(|p| near(*p, INK)), "the scanned word fills its box");
+
+        s.apply(id, Edit::EditTextBlock { page: 0, block: 0, text: edit.into(), style: Default::default() }).unwrap();
+
+        let blocks = s.get(id).unwrap().text_blocks(0);
+        assert_eq!(blocks.iter().map(|b| b.text.replace('\n', " ")).collect::<Vec<_>>(), [edit.replace('\n', " ")], "{edit:?}");
+        let px = word_pixels(&s, id);
+        let paper = px.iter().filter(|p| near(**p, PAPER)).count();
+        let ink = px.iter().filter(|p| near(**p, INK)).count();
+        assert!(paper * 10 > px.len() * 4, "{edit:?}: the cover is drawn over the scan: {paper} of {} paper", px.len());
+        assert!(ink * 100 > px.len() * 3, "{edit:?}: the new text shows: {ink} of {} ink", px.len());
+    }
+}

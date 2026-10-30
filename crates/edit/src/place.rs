@@ -346,6 +346,42 @@ pub(crate) fn place_tagged(doc: &mut Document, page: &pdfcraft_model::Page, tag:
     Ok(mark_ref)
 }
 
+/// Draw `ops`, written for the space whose CTM is `ctm`, on top of everything on `page`, tagged
+/// `Edited`. A rewritten invisible paragraph goes here when [`revealed_under_paint`]: an OCR
+/// layer written before the scan image it lies under would keep the revealed text hidden (#3973).
+pub(crate) fn draw_on_top(doc: &mut Document, page: &pdfcraft_model::Page, ctm: [f64; 6], ops: &[pdfcraft_content::Op]) -> Result<(), EditError> {
+    if ops.is_empty() {
+        return Ok(());
+    }
+    use pdfcraft_content::Op;
+    let mut all = vec![Op::new("q", vec![]), Op::new("cm", ctm.iter().map(|v| pdfcraft_content::num(*v)).collect())];
+    all.extend_from_slice(ops);
+    all.push(Op::new("Q", vec![]));
+    place_tagged(doc, page, "Edited", pdfcraft_content::serialize_ops(&all), false).map(drop)
+}
+
+/// Whether a rewritten paragraph that was `invisible` goes on top of the page: anything after
+/// operator `at` can paint over it there (an XObject, an inline image or a shading), as the scan
+/// image does over an OCR layer written before it (#3973).
+pub(crate) fn revealed_under_paint(invisible: bool, ops: &[pdfcraft_content::Op], at: usize) -> bool {
+    invisible && ops.get(at..).unwrap_or_default().iter().any(|op| op.is("Do") || op.is("BI") || op.is("sh"))
+}
+
+/// The operators to draw on top of `page` ([`draw_on_top`]): all of `paragraph` when `over`,
+/// after checking the page takes them, so a refusal leaves the document as it was.
+pub(crate) fn lift_on_top(
+    doc: &Document,
+    page: &pdfcraft_model::Page,
+    over: bool,
+    paragraph: &mut Vec<pdfcraft_content::Op>,
+) -> Result<Vec<pdfcraft_content::Op>, EditError> {
+    if !over {
+        return Ok(Vec::new());
+    }
+    check_on_top(doc, page)?;
+    Ok(std::mem::take(paragraph))
+}
+
 fn too_deep_on_top() -> EditError {
     EditError::Invalid("the page's marked content is nested too deeply to add anything on top of it".into())
 }
