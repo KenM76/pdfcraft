@@ -360,17 +360,59 @@ pub(crate) fn draw_on_top(doc: &mut Document, page: &pdfcraft_model::Page, ctm: 
     place_tagged(doc, page, "Edited", pdfcraft_content::serialize_ops(&all), false).map(drop)
 }
 
+/// Where a rewritten paragraph can be drawn, in user space ([`revealed_under_paint`]).
+pub(crate) struct Reach {
+    /// The paragraph's old box, where its cover goes.
+    pub rect: [f64; 4],
+    /// The move asked for (`BlockStyle::offset`).
+    pub offset: [f64; 2],
+    /// The widest line the rewrite may draw, how many lines it has, and how far apart they are.
+    pub width: f64,
+    pub rows: usize,
+    pub pitch: f64,
+    pub upright: bool,
+}
+
+impl Reach {
+    /// The old box and the moved one, grown to `width` either way (alignment may grow a line left
+    /// or right), down to `rows` lines and up to one `pitch` above its bottom (a larger size); turned text grows by the lines' diagonal every way.
+    /// Unbounded when a number is not finite.
+    pub(crate) fn bounds(&self) -> [f64; 4] {
+        const UNBOUNDED: [f64; 4] = [f64::NEG_INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::INFINITY];
+        let ([dx, dy], r) = (self.offset, self.rect);
+        if !r.iter().chain(&self.offset).chain([&self.width, &self.pitch]).all(|v| v.is_finite()) {
+            return UNBOUNDED;
+        }
+        let moved = [r[0] + dx, r[1] + dy, r[2] + dx, r[3] + dy];
+        let rows = f64::from(u32::try_from(self.rows).unwrap_or(u32::MAX));
+        let (width, height) = (self.width.abs(), self.pitch.abs() * rows);
+        let grown = if self.upright {
+            [
+                moved[0].min(moved[2] - width),
+                moved[1].min(moved[3] - height),
+                moved[2].max(moved[0] + width),
+                moved[3].max(moved[1] + self.pitch.abs()),
+            ]
+        } else {
+            let d = width.hypot(height);
+            [moved[0] - d, moved[1] - d, moved[2] + d, moved[3] + d]
+        };
+        let b = [r[0].min(grown[0]), r[1].min(grown[1]), r[2].max(grown[2]), r[3].max(grown[3])];
+        if b.iter().all(|v| v.is_finite()) { b } else { UNBOUNDED }
+    }
+}
+
 /// Whether a rewritten paragraph that was `invisible` goes on top of page `page`: something after
-/// operator `at` of the page's joined `ops` paints over its `rect` (user space), as the scan image
+/// operator `at` of the page's joined `ops` paints over `reach` (user space, [`Reach::bounds`]), as the scan image
 /// does over an OCR layer written before it (#3973). XObjects count where they are drawn; an inline
 /// image or a shading after it counts anywhere, and so does any XObject when the page's images
 /// cannot be listed.
-pub(crate) fn revealed_under_paint(doc: &Document, page: usize, invisible: bool, rect: [f64; 4], ops: &[pdfcraft_content::Op], at: usize) -> bool {
+pub(crate) fn revealed_under_paint(doc: &Document, page: usize, invisible: bool, reach: [f64; 4], ops: &[pdfcraft_content::Op], at: usize) -> bool {
     let later = ops.get(at..).unwrap_or_default();
     if !invisible || later.iter().any(|op| op.is("BI") || op.is("sh")) {
         return invisible;
     }
-    later.iter().any(|op| op.is("Do")) && crate::images::painted_over(doc, page, rect, at).unwrap_or(true)
+    later.iter().any(|op| op.is("Do")) && crate::images::painted_over(doc, page, reach, at).unwrap_or(true)
 }
 
 /// The operators to draw on top of the page ([`draw_on_top`]): all of `paragraph` when `over`,

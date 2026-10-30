@@ -785,11 +785,6 @@ pub(crate) fn rewrite_styled_block(
     // What is in force where the rewrite is drawn, and what the text after it expects.
     let after = if split { &o.state } else { &o.bt_state };
     let at = if split { start } else { o.bt_op };
-    // Revealed OCR text that something is painted over goes on top of the page, where it starts
-    // from the initial state.
-    let over = crate::revealed_under_paint(doc, page, block.invisible, block.rect, &ops, at);
-    let initial = TextState::initial();
-    let drawn_from = if over { &initial } else { after };
     validate_contextual_rows(&rows, &kept)?;
     let measured: Vec<_> = rows.iter().map(|row| measure(row)).collect::<Result<_, _>>()?;
     let shaped = prepare_shaped_rows(doc, &fonts, &rows, &kept, advance)?;
@@ -815,6 +810,16 @@ pub(crate) fn rewrite_styled_block(
         })
         .rfind(|v| *v > 0.0)
         .unwrap_or(first.size * 1.5);
+    // Revealed OCR text that something is painted over goes on top of the page, where it starts
+    // from the initial state.
+    let largest = style.ranges.iter().filter_map(|r| r.size).chain(style.size).fold(first.size, f64::max);
+    let pitch = source_leading.max(largest * style.line_spacing.unwrap_or(1.2));
+    let widest = measured.iter().copied().fold(width, f64::max);
+    // This path lays rows out along user-space baselines, so the paragraph is upright here.
+    let reach = crate::Reach { rect: block.rect, offset: [dx, dy], width: widest, rows: rows.len(), pitch, upright: true };
+    let over = crate::revealed_under_paint(doc, page, block.invisible, reach.bounds(), &ops, at);
+    let initial = TextState::initial();
+    let drawn_from = if over { &initial } else { after };
     let mut baseline = first.origin.baseline;
     for (row_index, row) in rows.iter().enumerate() {
         let anchor = block.rows.get(row_index).and_then(|r| r.first()).and_then(|i| lines.get(*i));

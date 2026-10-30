@@ -4571,6 +4571,46 @@ fn revealed_text_moves_on_top_only_when_painted_over() {
     assert!(on_top("BT /F1 12 Tf 3 Tr 400 600 Td (Inline) Tj ET BI /W 1 /H 1 /CS /G /BPC 8 ID x EI"), "an inline image after it");
 }
 
+/// Revealed OCR text is checked where the rewrite lands, not only where it was: an image drawn
+/// after it over just the moved or grown text still lifts the text on top, on both rewrite paths.
+#[test]
+fn an_ocr_rewrite_goes_on_top_of_paint_over_where_it_lands() {
+    let scan = "q 200 0 0 100 100 100 cm /Im0 Do Q";
+    let moved = text::BlockStyle { offset: Some([-290.0, -450.0]), ..Default::default() };
+    let cases = [
+        ("BT /F1 12 Tf 3 Tr 400 600 Td (Away) Tj ET", "Moved", &moved),
+        ("BT /F1 12 Tf 3 Tr 400 600 Td (Away) Tj ET", "Moved\nTwice", &moved),
+        ("BT /F1 12 Tf 3 Tr 40 150 Td (Hi) Tj ET", "Hello there, this line now runs well past the scan's left edge", &text::BlockStyle::default()),
+        ("BT /F1 12 Tf 3 Tr 40 150 Td (Hi) Tj ET", "Hello there,\nthis line now runs well past the scan's left edge", &text::BlockStyle::default()),
+        ("BT /F1 12 Tf 3 Tr 110 230 Td (Above) Tj ET", "One\nTwo\nThree\nFour\nFive\nSix", &text::BlockStyle::default()),
+    ];
+    for (content, edit, style) in cases {
+        let mut doc = image_page_with(&format!("{content} {scan}"));
+        let before = text::text_blocks(&doc, 0).unwrap().remove(0);
+        let ops = pdfcraft_content::parse(&page_content_bytes(&doc, 0)).ops;
+        let at = ops.iter().position(|o| o.is("BT")).unwrap();
+        assert!(!revealed_under_paint(&doc, 0, true, before.rect, &ops, at), "{edit:?}: the old box alone is clear of the scan");
+        text::rewrite_block(&mut doc, 0, 0, Some(edit), style).unwrap();
+        let ops = pdfcraft_content::parse(&page_content_bytes(&doc, 0)).ops;
+        let scan_at = ops.iter().position(|o| o.is("Do")).unwrap();
+        let shows = ["Tj", "TJ", "'", "\""];
+        assert!(ops.iter().skip(scan_at).any(|o| shows.iter().any(|s| o.is(s))), "{edit:?}: the rewrite is drawn over the scan");
+    }
+}
+
+/// [`crate::Reach`] grows the old box to the move, the width either way and the lines below.
+#[test]
+fn a_rewrites_reach_covers_its_move_width_and_lines() {
+    let reach = |offset, width, rows, upright| crate::Reach { rect: [10.0, 90.0, 30.0, 100.0], offset, width, rows, pitch: 10.0, upright }.bounds();
+    assert_eq!(reach([0.0, 0.0], 20.0, 1, true), [10.0, 90.0, 30.0, 100.0]);
+    assert_eq!(reach([5.0, -50.0], 20.0, 1, true), [10.0, 40.0, 35.0, 100.0]);
+    assert_eq!(reach([0.0, 0.0], 50.0, 3, true), [-20.0, 70.0, 60.0, 100.0]);
+    assert_eq!(reach([0.0, 0.0], 30.0, 4, false), [-40.0, 40.0, 80.0, 150.0]);
+    assert_eq!(reach([f64::NAN, 0.0], 20.0, 1, true)[0], f64::NEG_INFINITY);
+    let larger = crate::Reach { rect: [10.0, 90.0, 30.0, 100.0], offset: [0.0, 0.0], width: 20.0, rows: 1, pitch: 24.0, upright: true };
+    assert_eq!(larger.bounds(), [10.0, 76.0, 30.0, 114.0], "a larger size grows the line up as well as down");
+}
+
 /// Revealed OCR text may have to go on top of the page; a page whose marked content nests too deep
 /// for that is refused before either rewrite path changes anything.
 #[test]
