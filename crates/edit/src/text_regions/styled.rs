@@ -402,6 +402,16 @@ fn paragraph_geometry(doc: &Document, page: &pdfcraft_model::Page, block: &TextB
     Ok((dx, dy, style.width.unwrap_or(natural).clamp(1.0, 14_400.0)))
 }
 
+/// How far below a row of `size` the next one is written: the source's leading unless a size
+/// or line spacing is chosen.
+fn row_step(style: &BlockStyle, size: f64, source_leading: f64) -> f64 {
+    if style.line_spacing.is_none() && style.size.is_none() {
+        source_leading
+    } else {
+        style.line_spacing.unwrap_or(1.5).clamp(0.5, 5.0) * style.size.unwrap_or(size)
+    }
+}
+
 fn wrap_styled_rows(
     chars: &[StyledChar],
     width: f64,
@@ -812,8 +822,9 @@ pub(crate) fn rewrite_styled_block(
         .unwrap_or(first.size * 1.5);
     // Revealed OCR text that something is painted over goes on top of the page, where it starts
     // from the initial state.
-    let largest = style.ranges.iter().filter_map(|r| r.size).chain(style.size).fold(first.size, f64::max);
-    let pitch = source_leading.max(largest * style.line_spacing.unwrap_or(1.2));
+    let largest =
+        block.lines.iter().filter_map(|i| lines.get(*i)).map(|l| l.size).chain(style.ranges.iter().filter_map(|r| r.size)).fold(first.size, f64::max);
+    let pitch = source_leading.max(row_step(style, largest, source_leading));
     let widest = measured.iter().copied().fold(width, f64::max);
     // This path lays rows out along user-space baselines, so the paragraph is upright here.
     let reach = crate::Reach { rect: block.rect, offset: [dx, dy], width: widest, rows: rows.len(), pitch, upright: true };
@@ -972,11 +983,7 @@ pub(crate) fn rewrite_styled_block(
             x += segment_width;
             pos = end;
         }
-        baseline -= if style.line_spacing.is_none() && style.size.is_none() {
-            source_leading
-        } else {
-            style.line_spacing.unwrap_or(1.5).clamp(0.5, 5.0) * style.size.unwrap_or(anchor.size)
-        };
+        baseline -= row_step(style, anchor.size, source_leading);
     }
     block_ops.push(Op::new("Q", vec![]));
     let on_top = crate::lift_on_top(over, &mut block_ops);

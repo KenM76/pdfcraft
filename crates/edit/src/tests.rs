@@ -4577,6 +4577,8 @@ fn revealed_text_moves_on_top_only_when_painted_over() {
 fn an_ocr_rewrite_goes_on_top_of_paint_over_where_it_lands() {
     let scan = "q 200 0 0 100 100 100 cm /Im0 Do Q";
     let moved = text::BlockStyle { offset: Some([-290.0, -450.0]), ..Default::default() };
+    let sized = text::BlockStyle { size: Some(24.0), ..Default::default() };
+    let spaced = text::BlockStyle { line_spacing: Some(3.0), ..Default::default() };
     let cases = [
         ("BT /F1 12 Tf 3 Tr 400 600 Td (Away) Tj ET", "Moved", &moved),
         ("BT /F1 12 Tf 3 Tr 400 600 Td (Away) Tj ET", "Moved\nTwice", &moved),
@@ -4584,7 +4586,12 @@ fn an_ocr_rewrite_goes_on_top_of_paint_over_where_it_lands() {
         ("BT /F1 12 Tf 3 Tr 40 150 Td (Hi) Tj ET", "Hello there,\nthis line now runs well past the scan's left edge", &text::BlockStyle::default()),
         ("BT /F1 12 Tf 3 Tr 110 230 Td (Above) Tj ET", "One\nTwo\nThree\nFour\nFive\nSix", &text::BlockStyle::default()),
     ];
-    for (content, edit, style) in cases {
+    let low = "q 200 0 0 30 100 300 cm /Im0 Do Q";
+    let cases = cases.into_iter().map(|(c, e, s)| (c, e, s, scan)).chain([
+        ("BT /F1 12 Tf 3 Tr 110 500 Td (Above) Tj ET", "One\nTwo\nThree\nFour\nFive\nSix", &sized, low),
+        ("BT /F1 12 Tf 3 Tr 110 500 Td (Above) Tj ET", "One\nTwo\nThree\nFour\nFive\nSix", &spaced, low),
+    ]);
+    for (content, edit, style, scan) in cases {
         let mut doc = image_page_with(&format!("{content} {scan}"));
         let before = text::text_blocks(&doc, 0).unwrap().remove(0);
         let ops = pdfcraft_content::parse(&page_content_bytes(&doc, 0)).ops;
