@@ -43,7 +43,8 @@ pub fn som_to_path(som: &str) -> DataPath {
 /// The data path the object at `som` binds to: [`som_to_path`] without the areas on the way.
 /// An area is a named container in the form, so it is part of SOM expressions, but only
 /// subforms, exclusion groups and fields are data scopes: what an area holds binds under the
-/// area's parent, as Adobe's viewers write it. The template tells which segments are areas;
+/// area's parent, as Adobe's viewers write it. A subform bound with `match="none"` is no data
+/// scope either. The template tells which segments are areas;
 /// segments it doesn't have (page-set objects, or a SOM from another template) are kept.
 pub fn data_path(tpl: &Template, som: &str) -> DataPath {
     let mut out = DataPath::new();
@@ -55,6 +56,7 @@ pub fn data_path(tpl: &Template, som: &str) -> DataPath {
             None if i == 0 && tpl.root.common.name.as_deref() == Some(name.as_str()) => Some(Container::Children(&tpl.root.children)),
             None => None,
             Some(children) => match named(children, &name, 0) {
+                Some(Node::Subform(sf)) if sf.unbound => Some(Container::Area(&sf.children)),
                 Some(Node::Subform(sf)) => Some(Container::Children(&sf.children)),
                 Some(Node::Area(a)) => Some(Container::Area(&a.children)),
                 _ => None,
@@ -77,7 +79,7 @@ pub fn data_path(tpl: &Template, som: &str) -> DataPath {
 
 enum Container<'a> {
     Children(&'a [Node]),
-    /// Contents bind under the area's parent.
+    /// Not a data scope: contents bind under the container's parent.
     Area(&'a [Node]),
 }
 

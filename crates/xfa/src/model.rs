@@ -432,6 +432,9 @@ pub struct Subform {
     pub column_widths: Vec<f64>,
     /// `<overflow leader="…">`: the named child (a header row) is repeated after a page break.
     pub overflow_leader: Option<String>,
+    /// `<bind match="none">`: the subform is not a data scope, so what it holds binds under
+    /// its parent's data node.
+    pub unbound: bool,
 }
 
 /// A positioned group without a box of its own.

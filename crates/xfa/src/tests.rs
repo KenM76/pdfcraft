@@ -2148,6 +2148,32 @@ fn data_paths_leave_areas_out() {
     assert_eq!(data_path(&tpl, ""), Vec::new());
 }
 
+/// A subform bound with `match="none"` is not a data scope (XFA 3.3, "Data Binding"): its fields
+/// bind under its parent's data node, so a form whose sections are all unbound reads flat data.
+#[test]
+fn unbound_subforms_are_not_data_scopes() {
+    let tpl_xml = r#"<template xmlns="http://www.xfa.org/schema/xfa-template/3.3/"><subform name="form"><pageSet><pageArea name="P"><contentArea w="8in" h="10in"/></pageArea></pageSet>
+<subform name="sec" layout="tb"><bind match="none"/><field name="colour" w="2in" h="10mm"><ui><textEdit/></ui></field>
+<subform name="inner"><field name="pet" w="2in" h="10mm"><ui><textEdit/></ui></field></subform></subform>
+<subform name="bound"><field name="town" w="2in" h="10mm"><ui><textEdit/></ui></field></subform></subform></template>"#;
+    let (tpl, _) = parse(tpl_xml).unwrap();
+    let path = |som: &str| data_path(&tpl, som).into_iter().map(|(n, i)| format!("{n}[{i}]")).collect::<Vec<_>>().join(".");
+    assert_eq!(path("form[0].sec[0].colour[0]"), "form[0].colour[0]");
+    assert_eq!(path("form[0].sec[0].inner[0].pet[0]"), "form[0].inner[0].pet[0]");
+    assert_eq!(path("form[0].bound[0].town[0]"), "form[0].bound[0].town[0]", "a bound subform stays a scope");
+    let data = parse_datasets("<xfa:datasets xmlns:xfa=\"http://www.xfa.org/schema/xfa-data/1.0/\"><xfa:data><form><colour>Teal</colour><inner><pet>Biscuit</pet></inner><bound><town>Springfield</town></bound></form></xfa:data></xfa:datasets>").unwrap();
+    let root = form_tree(&tpl, Some(&data), &Overrides::default()).root;
+    let find = |name: &str| {
+        fn walk<'a>(n: &'a crate::script::FormNode, name: &str) -> Option<&'a crate::script::FormNode> {
+            if n.name == name { Some(n) } else { n.children.iter().find_map(|c| walk(c, name)) }
+        }
+        walk(&root, name).map(|n| n.value.clone())
+    };
+    assert_eq!(find("colour").as_deref(), Some("Teal"));
+    assert_eq!(find("pet").as_deref(), Some("Biscuit"));
+    assert_eq!(find("town").as_deref(), Some("Springfield"));
+}
+
 /// A template nested thousands of elements deep must be refused. roxmltree recurses with the
 /// nesting depth, so it used to overflow the stack - and a stack overflow aborts the process,
 /// which no `catch_unwind` can intercept.
