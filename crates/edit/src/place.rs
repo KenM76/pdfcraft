@@ -375,7 +375,7 @@ pub(crate) struct Reach {
 
 impl Reach {
     /// The old box and the moved one, grown to `width` either way (alignment may grow a line left
-    /// or right), down to `rows` lines and up to one `pitch` above its bottom (a larger size); turned text grows by the lines' diagonal every way.
+    /// or right), down to `rows` lines and up one `pitch` above its top (a larger size on the first line, however many lines the old box had); turned text grows by the lines' diagonal every way.
     /// Unbounded when a number is not finite.
     pub(crate) fn bounds(&self) -> [f64; 4] {
         const UNBOUNDED: [f64; 4] = [f64::NEG_INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::INFINITY];
@@ -387,12 +387,7 @@ impl Reach {
         let rows = f64::from(u32::try_from(self.rows).unwrap_or(u32::MAX));
         let (width, height) = (self.width.abs(), self.pitch.abs() * rows);
         let grown = if self.upright {
-            [
-                moved[0].min(moved[2] - width),
-                moved[1].min(moved[3] - height),
-                moved[2].max(moved[0] + width),
-                moved[3].max(moved[1] + self.pitch.abs()),
-            ]
+            [moved[0].min(moved[2] - width), moved[1].min(moved[3] - height), moved[2].max(moved[0] + width), moved[3] + self.pitch.abs()]
         } else {
             let d = width.hypot(height);
             [moved[0] - d, moved[1] - d, moved[2] + d, moved[3] + d]

@@ -4622,13 +4622,13 @@ fn an_ocr_rewrite_goes_on_top_of_paint_over_where_it_lands() {
 #[test]
 fn a_rewrites_reach_covers_its_move_width_and_lines() {
     let reach = |offset, width, rows, upright| crate::Reach { rect: [10.0, 90.0, 30.0, 100.0], offset, width, rows, pitch: 10.0, upright }.bounds();
-    assert_eq!(reach([0.0, 0.0], 20.0, 1, true), [10.0, 90.0, 30.0, 100.0]);
+    assert_eq!(reach([0.0, 0.0], 20.0, 1, true), [10.0, 90.0, 30.0, 110.0]);
     assert_eq!(reach([5.0, -50.0], 20.0, 1, true), [10.0, 40.0, 35.0, 100.0]);
-    assert_eq!(reach([0.0, 0.0], 50.0, 3, true), [-20.0, 70.0, 60.0, 100.0]);
+    assert_eq!(reach([0.0, 0.0], 50.0, 3, true), [-20.0, 70.0, 60.0, 110.0]);
     assert_eq!(reach([0.0, 0.0], 30.0, 4, false), [-40.0, 40.0, 80.0, 150.0]);
     assert_eq!(reach([f64::NAN, 0.0], 20.0, 1, true)[0], f64::NEG_INFINITY);
     let larger = crate::Reach { rect: [10.0, 90.0, 30.0, 100.0], offset: [0.0, 0.0], width: 20.0, rows: 1, pitch: 24.0, upright: true };
-    assert_eq!(larger.bounds(), [10.0, 76.0, 30.0, 114.0], "a larger size grows the line up as well as down");
+    assert_eq!(larger.bounds(), [10.0, 76.0, 30.0, 124.0], "a larger size grows the line up as well as down");
 }
 
 /// Revealed OCR text may have to go on top of the page; a page whose marked content nests too deep
