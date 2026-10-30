@@ -367,19 +367,10 @@ pub(crate) fn revealed_under_paint(invisible: bool, ops: &[pdfcraft_content::Op]
     invisible && ops.get(at..).unwrap_or_default().iter().any(|op| op.is("Do") || op.is("BI") || op.is("sh"))
 }
 
-/// The operators to draw on top of `page` ([`draw_on_top`]): all of `paragraph` when `over`,
-/// after checking the page takes them, so a refusal leaves the document as it was.
-pub(crate) fn lift_on_top(
-    doc: &Document,
-    page: &pdfcraft_model::Page,
-    over: bool,
-    paragraph: &mut Vec<pdfcraft_content::Op>,
-) -> Result<Vec<pdfcraft_content::Op>, EditError> {
-    if !over {
-        return Ok(Vec::new());
-    }
-    check_on_top(doc, page)?;
-    Ok(std::mem::take(paragraph))
+/// The operators to draw on top of the page ([`draw_on_top`]): all of `paragraph` when `over`,
+/// none otherwise. The page was checked to take them ([`check_on_top`]) before the edit began.
+pub(crate) fn lift_on_top(over: bool, paragraph: &mut Vec<pdfcraft_content::Op>) -> Vec<pdfcraft_content::Op> {
+    if over { std::mem::take(paragraph) } else { Vec::new() }
 }
 
 fn too_deep_on_top() -> EditError {

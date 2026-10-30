@@ -211,6 +211,11 @@ fn visible_stretched_text_rewrites_unchanged() {
 /// A scan whose OCR layer is drawn first and the opaque page image over it, as some OCR tools
 /// write it (#3973): invisible Helvetica `text` on the scanned word, then the image.
 fn ocr_under_scan(text: &str) -> std::sync::Arc<Vec<u8>> {
+    under_scan(&format!("BT /F1 20 Tf 3 Tr 42 44 Td ({text}) Tj ET"))
+}
+
+/// A page whose `text` content is followed by the opaque 200 × 100 scan image.
+fn under_scan(text: &str) -> std::sync::Arc<Vec<u8>> {
     use pdfcraft_cos::{Dict, Document, Object, SaveOptions, Stream};
     let (w, h) = (200u32, 100u32);
     let mut rgb = Vec::new();
@@ -222,7 +227,7 @@ fn ocr_under_scan(text: &str) -> std::sync::Arc<Vec<u8>> {
     }
     let mut d = Document::new_empty();
     let pages = d.add(Object::Dict(Dict::new()));
-    let content = format!("BT /F1 20 Tf 3 Tr 42 44 Td ({text}) Tj ET q 200 0 0 100 0 0 cm /Im Do Q");
+    let content = format!("{text} q 200 0 0 100 0 0 cm /Im Do Q");
     let contents = d.add(Object::Stream(Stream::flate(Dict::new(), content.as_bytes())));
     let mut image = Dict::new();
     image.set(b"Type".to_vec(), Object::name("XObject"));
@@ -264,9 +269,27 @@ fn ocr_under_scan(text: &str) -> std::sync::Arc<Vec<u8>> {
     std::sync::Arc::new(pdfcraft_cos::write_full(&d, &SaveOptions::default()).unwrap())
 }
 
+/// The scanned word's box shows the cover and new ink, not the scan.
+fn assert_edit_shows(s: &Session, id: pdfcraft_engine::DocId, label: &str) {
+    let px = word_pixels(s, id);
+    let paper = px.iter().filter(|p| near(**p, PAPER)).count();
+    let ink = px.iter().filter(|p| near(**p, INK)).count();
+    assert!(paper * 10 > px.len() * 4, "{label}: the cover is drawn over the scan: {paper} of {} paper", px.len());
+    assert!(ink * 100 > px.len() * 3, "{label}: the new text shows: {ink} of {} ink", px.len());
+}
+
+fn texts(s: &Session, id: pdfcraft_engine::DocId) -> Vec<String> {
+    s.get(id).unwrap().text_blocks(0).iter().map(|b| b.text.replace('\n', " ")).collect()
+}
+
+fn edit_block(s: &mut Session, id: pdfcraft_engine::DocId, block: usize, text: &str) {
+    s.apply(id, Edit::EditTextBlock { page: 0, block, text: text.into(), style: Default::default() }).unwrap();
+}
+
 /// The OCR layer is under the scan image: the rewritten paragraph is drawn on top of the image,
 /// not in the OCR text's place where the image would hide it (#3973). One line takes the
-/// single-style rewrite, a typed line break the styled one.
+/// single-style rewrite, a typed line break the styled one. Undo restores the hidden layer, and
+/// the edit survives redo, a save and reopen, and being edited again.
 #[test]
 fn an_ocr_layer_under_the_scan_image_shows_its_edit() {
     for edit in ["Jane", "Jane\nDoe"] {
@@ -277,14 +300,46 @@ fn an_ocr_layer_under_the_scan_image_shows_its_edit() {
         assert!(blocks[0].invisible, "the OCR layer is invisible text");
         assert!(word_pixels(&s, id).iter().all(|p| near(*p, INK)), "the scanned word fills its box");
 
-        s.apply(id, Edit::EditTextBlock { page: 0, block: 0, text: edit.into(), style: Default::default() }).unwrap();
+        edit_block(&mut s, id, 0, edit);
+        assert_eq!(texts(&s, id), [edit.replace('\n', " ")], "{edit:?}");
+        assert_edit_shows(&s, id, edit);
 
+        s.undo(id).unwrap();
+        assert_eq!(texts(&s, id), ["John"], "{edit:?}: undo");
+        assert!(s.get(id).unwrap().text_blocks(0)[0].invisible, "{edit:?}: undo hides the layer again");
+        assert!(word_pixels(&s, id).iter().all(|p| near(*p, INK)), "{edit:?}: undo shows the scan again");
+        s.redo(id).unwrap();
+        assert_edit_shows(&s, id, &format!("{edit:?} redo"));
+
+        let saved = s.save_bytes(id).unwrap();
+        let mut reopened = Session::new();
+        let id = reopened.open("saved.pdf", None, saved, None).unwrap();
+        assert_eq!(texts(&reopened, id), [edit.replace('\n', " ")], "{edit:?}: reopened");
+        assert_edit_shows(&reopened, id, &format!("{edit:?} reopened"));
+
+        edit_block(&mut reopened, id, 0, "Ann");
+        assert_eq!(texts(&reopened, id), ["Ann"], "{edit:?}: edited again");
+        assert_edit_shows(&reopened, id, &format!("{edit:?} edited again"));
+    }
+}
+
+/// Visible text earlier in the same text object makes the rewrite split it; the OCR phrase still
+/// goes on top of the scan, and the visible text stays.
+#[test]
+fn an_ocr_phrase_split_from_visible_text_under_the_scan_shows_its_edit() {
+    for edit in ["Jane", "Jane\nDoe"] {
+        let mut s = Session::new();
+        let page = under_scan("BT /F1 20 Tf 10 80 Td (Head) Tj 3 Tr 32 -36 Td (John) Tj ET");
+        let id = s.open("split.pdf", None, page, None).unwrap();
         let blocks = s.get(id).unwrap().text_blocks(0);
-        assert_eq!(blocks.iter().map(|b| b.text.replace('\n', " ")).collect::<Vec<_>>(), [edit.replace('\n', " ")], "{edit:?}");
-        let px = word_pixels(&s, id);
-        let paper = px.iter().filter(|p| near(**p, PAPER)).count();
-        let ink = px.iter().filter(|p| near(**p, INK)).count();
-        assert!(paper * 10 > px.len() * 4, "{edit:?}: the cover is drawn over the scan: {paper} of {} paper", px.len());
-        assert!(ink * 100 > px.len() * 3, "{edit:?}: the new text shows: {ink} of {} ink", px.len());
+        let john = blocks.iter().position(|b| b.text == "John").unwrap();
+        assert!(blocks[john].invisible && blocks.iter().any(|b| b.text == "Head" && !b.invisible), "{blocks:?}");
+        edit_block(&mut s, id, john, edit);
+        let mut after = texts(&s, id);
+        after.sort();
+        let mut want = vec!["Head".to_string(), edit.replace('\n', " ")];
+        want.sort();
+        assert_eq!(after, want, "{edit:?}");
+        assert_edit_shows(&s, id, &format!("{edit:?} split"));
     }
 }

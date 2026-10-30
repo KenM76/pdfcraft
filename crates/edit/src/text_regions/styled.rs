@@ -974,7 +974,7 @@ pub(crate) fn rewrite_styled_block(
         };
     }
     block_ops.push(Op::new("Q", vec![]));
-    let on_top = crate::lift_on_top(doc, &p, over, &mut block_ops)?;
+    let on_top = crate::lift_on_top(over, &mut block_ops);
     block_ops.extend(after.ops());
     if split {
         block_ops.insert(0, Op::new("ET", vec![]));

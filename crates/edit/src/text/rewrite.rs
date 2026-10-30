@@ -755,6 +755,11 @@ pub(crate) fn rewrite_block_from(
     let first = members.first().copied().ok_or_else(|| EditError::Invalid("the paragraph has no source runs".into()))?;
     members.iter().try_for_each(|line| line.ensure_editable())?;
     let p = page_dict(doc, page)?;
+    // Revealed OCR text may go on top of the page (see `revealed_under_paint`): a page that can't
+    // take that is refused here, before either rewrite path changes anything.
+    if b.invisible {
+        crate::check_on_top(doc, &p)?;
+    }
     let mut res = p.dict.get(b"Resources").map(|r| doc.resolve(r)).and_then(|r| r.as_dict().cloned()).unwrap_or_default();
     let mut fonts_res = res.get(b"Font").map(|f| doc.resolve(f)).and_then(|f| f.as_dict().cloned()).unwrap_or_default();
     let dispatch = choose_rewrite_path(doc, &fonts_res, &b, &members, first, text, style)?;
@@ -884,7 +889,7 @@ pub(crate) fn rewrite_block_from(
         underline: style.underline == Some(true),
     };
     let mut block_ops = block_ops(&plan, &writer, &wrapped, font.show_font.clone())?;
-    let on_top = crate::lift_on_top(doc, &p, over, &mut block_ops)?;
+    let on_top = crate::lift_on_top(over, &mut block_ops);
     let n = pdfcraft_content::num;
     block_ops.extend(after.ops().into_iter().filter(|op| !op.is("Tf") || after.font.is_some()));
     if split {

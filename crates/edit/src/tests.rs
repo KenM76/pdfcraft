@@ -4550,6 +4550,21 @@ fn group_selection_refuses_incomplete_content_and_resource_budget_overruns() {
     assert!(editable_objects(&doc, 0).is_err(), "an undecodable stream is refused");
 }
 
+/// Revealed OCR text may have to go on top of the page; a page whose marked content nests too deep
+/// for that is refused before either rewrite path changes anything.
+#[test]
+fn an_ocr_rewrite_refused_on_top_leaves_the_document_as_it_was() {
+    let content = format!("{} BT /F1 20 Tf 3 Tr 42 44 Td (John) Tj ET /Im Do {}", "/X BMC ".repeat(10_001), "EMC ".repeat(10_001));
+    let mut doc = text_page(&content);
+    assert!(text::text_blocks(&doc, 0).unwrap()[0].invisible);
+    let before = write_full(&doc, &SaveOptions::default()).unwrap();
+    for edit in ["Jane", "Jane\nDoe"] {
+        let error = text::rewrite_block(&mut doc, 0, 0, Some(edit), &text::BlockStyle::default()).unwrap_err();
+        assert!(error.to_string().contains("nested too deeply"), "{edit:?}: {error}");
+        assert!(write_full(&doc, &SaveOptions::default()).unwrap() == before, "{edit:?}: a refused rewrite changes nothing");
+    }
+}
+
 #[test]
 fn group_move_budget_refusals_keep_the_original_page_selectable() {
     let text = text_page(&format!("{} BT /F1 12 Tf 40 400 Td (Target) Tj ET", "n ".repeat(99_995)));
