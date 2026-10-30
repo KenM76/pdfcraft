@@ -824,7 +824,8 @@ pub(crate) fn rewrite_styled_block(
     // from the initial state.
     let largest =
         block.lines.iter().filter_map(|i| lines.get(*i)).map(|l| l.size).chain(style.ranges.iter().filter_map(|r| r.size)).fold(first.size, f64::max);
-    let pitch = source_leading.max(row_step(style, largest, source_leading));
+    // At least one line of the largest glyphs, so a larger range reaches up as far as it draws.
+    let pitch = source_leading.max(row_step(style, largest, source_leading)).max(largest * 1.2);
     let widest = measured.iter().copied().fold(width, f64::max);
     // This path lays rows out along user-space baselines, so the paragraph is upright here.
     let reach = crate::Reach { rect: block.rect, offset: [dx, dy], width: widest, rows: rows.len(), pitch, upright: true };

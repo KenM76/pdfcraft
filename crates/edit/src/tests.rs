@@ -4579,6 +4579,18 @@ fn an_ocr_rewrite_goes_on_top_of_paint_over_where_it_lands() {
     let moved = text::BlockStyle { offset: Some([-290.0, -450.0]), ..Default::default() };
     let sized = text::BlockStyle { size: Some(24.0), ..Default::default() };
     let spaced = text::BlockStyle { line_spacing: Some(3.0), ..Default::default() };
+    let range = text::RangeStyle {
+        range: 0..2,
+        family: None,
+        resource: None,
+        size: Some(120.0),
+        color: None,
+        underline: None,
+        char_spacing: None,
+        scale: None,
+    };
+    let enlarged = text::BlockStyle { ranges: vec![range], ..Default::default() };
+    let above = "q 200 0 0 60 100 200 cm /Im0 Do Q";
     let cases = [
         ("BT /F1 12 Tf 3 Tr 400 600 Td (Away) Tj ET", "Moved", &moved),
         ("BT /F1 12 Tf 3 Tr 400 600 Td (Away) Tj ET", "Moved\nTwice", &moved),
@@ -4590,6 +4602,7 @@ fn an_ocr_rewrite_goes_on_top_of_paint_over_where_it_lands() {
     let cases = cases.into_iter().map(|(c, e, s)| (c, e, s, scan)).chain([
         ("BT /F1 12 Tf 3 Tr 110 500 Td (Above) Tj ET", "One\nTwo\nThree\nFour\nFive\nSix", &sized, low),
         ("BT /F1 12 Tf 3 Tr 110 500 Td (Above) Tj ET", "One\nTwo\nThree\nFour\nFive\nSix", &spaced, low),
+        ("BT /F1 12 Tf 3 Tr 110 150 Td (Hi there) Tj ET", "Hi there", &enlarged, above),
     ]);
     for (content, edit, style, scan) in cases {
         let mut doc = image_page_with(&format!("{content} {scan}"));
