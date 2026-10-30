@@ -787,7 +787,7 @@ pub(crate) fn rewrite_styled_block(
     let at = if split { start } else { o.bt_op };
     // Revealed OCR text that something is painted over goes on top of the page, where it starts
     // from the initial state.
-    let over = crate::revealed_under_paint(block.invisible, &ops, at);
+    let over = crate::revealed_under_paint(doc, page, block.invisible, block.rect, &ops, at);
     let initial = TextState::initial();
     let drawn_from = if over { &initial } else { after };
     validate_contextual_rows(&rows, &kept)?;

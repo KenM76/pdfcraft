@@ -360,11 +360,17 @@ pub(crate) fn draw_on_top(doc: &mut Document, page: &pdfcraft_model::Page, ctm: 
     place_tagged(doc, page, "Edited", pdfcraft_content::serialize_ops(&all), false).map(drop)
 }
 
-/// Whether a rewritten paragraph that was `invisible` goes on top of the page: anything after
-/// operator `at` can paint over it there (an XObject, an inline image or a shading), as the scan
-/// image does over an OCR layer written before it (#3973).
-pub(crate) fn revealed_under_paint(invisible: bool, ops: &[pdfcraft_content::Op], at: usize) -> bool {
-    invisible && ops.get(at..).unwrap_or_default().iter().any(|op| op.is("Do") || op.is("BI") || op.is("sh"))
+/// Whether a rewritten paragraph that was `invisible` goes on top of page `page`: something after
+/// operator `at` of the page's joined `ops` paints over its `rect` (user space), as the scan image
+/// does over an OCR layer written before it (#3973). XObjects count where they are drawn; an inline
+/// image or a shading after it counts anywhere, and so does any XObject when the page's images
+/// cannot be listed.
+pub(crate) fn revealed_under_paint(doc: &Document, page: usize, invisible: bool, rect: [f64; 4], ops: &[pdfcraft_content::Op], at: usize) -> bool {
+    let later = ops.get(at..).unwrap_or_default();
+    if !invisible || later.iter().any(|op| op.is("BI") || op.is("sh")) {
+        return invisible;
+    }
+    later.iter().any(|op| op.is("Do")) && crate::images::painted_over(doc, page, rect, at).unwrap_or(true)
 }
 
 /// The operators to draw on top of the page ([`draw_on_top`]): all of `paragraph` when `over`,

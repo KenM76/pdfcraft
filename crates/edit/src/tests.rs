@@ -4550,20 +4550,25 @@ fn group_selection_refuses_incomplete_content_and_resource_budget_overruns() {
     assert!(editable_objects(&doc, 0).is_err(), "an undecodable stream is refused");
 }
 
-/// Only invisible text with an XObject, inline image or shading painted after its place moves on top.
+/// Invisible text moves on top only when something painted after it covers it: an XObject drawn
+/// over its box, or any inline image or shading.
 #[test]
 fn revealed_text_moves_on_top_only_when_painted_over() {
-    let ops = pdfcraft_content::parse(b"BT (a) Tj ET q /Im Do Q BT (b) Tj ET BI /W 1 ID x EI /Sh sh").ops;
-    let at = |name: &str, n: usize| ops.iter().enumerate().filter(|(_, o)| o.is(name)).nth(n).map(|(i, _)| i).unwrap();
-    let after_bi = at("BI", 0) + 1;
-    assert!(revealed_under_paint(true, &ops, at("BT", 0)));
-    assert!(revealed_under_paint(true, &ops, at("BT", 1)), "inline image and shading after it");
-    assert!(revealed_under_paint(true, &ops, after_bi), "a shading after it");
-    assert!(!revealed_under_paint(true, &ops, ops.len()), "nothing after it");
-    assert!(!revealed_under_paint(true, &ops, ops.len() + 5), "past the end");
-    assert!(!revealed_under_paint(false, &ops, 0), "visible text stays where it is");
-    let text_only = pdfcraft_content::parse(b"BT (a) Tj ET 0 0 10 10 re f").ops;
-    assert!(!revealed_under_paint(true, &text_only, 0), "a filled path does not move it");
+    let on_top = |content: &str| {
+        let doc = image_page_with(content);
+        let block = text::text_blocks(&doc, 0).unwrap().remove(0);
+        let ops = pdfcraft_content::parse(&page_content_bytes(&doc, 0)).ops;
+        let at = ops.iter().position(|o| o.is("BT")).unwrap();
+        revealed_under_paint(&doc, 0, block.invisible, block.rect, &ops, at)
+    };
+    let scan = "q 200 0 0 100 100 100 cm /Im0 Do Q";
+    assert!(on_top(&format!("BT /F1 12 Tf 3 Tr 110 150 Td (Under) Tj ET {scan}")), "the scan covers it");
+    assert!(!on_top(&format!("BT /F1 12 Tf 3 Tr 400 600 Td (Away) Tj ET {scan}")), "an image elsewhere");
+    assert!(!on_top(&format!("{scan} BT /F1 12 Tf 3 Tr 110 150 Td (Over) Tj ET")), "the scan is drawn first");
+    assert!(!on_top(&format!("BT /F1 12 Tf 0 Tr 110 150 Td (Shown) Tj ET {scan}")), "visible text stays where it is");
+    assert!(!on_top("BT /F1 12 Tf 3 Tr 110 150 Td (Path) Tj ET 0 0 600 800 re f"), "a filled path does not move it");
+    assert!(on_top("BT /F1 12 Tf 3 Tr 400 600 Td (Shade) Tj ET /Sh sh"), "a shading after it");
+    assert!(on_top("BT /F1 12 Tf 3 Tr 400 600 Td (Inline) Tj ET BI /W 1 /H 1 /CS /G /BPC 8 ID x EI"), "an inline image after it");
 }
 
 /// Revealed OCR text may have to go on top of the page; a page whose marked content nests too deep
