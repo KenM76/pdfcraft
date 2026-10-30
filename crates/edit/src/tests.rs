@@ -4550,6 +4550,22 @@ fn group_selection_refuses_incomplete_content_and_resource_budget_overruns() {
     assert!(editable_objects(&doc, 0).is_err(), "an undecodable stream is refused");
 }
 
+/// Only invisible text with an XObject, inline image or shading painted after its place moves on top.
+#[test]
+fn revealed_text_moves_on_top_only_when_painted_over() {
+    let ops = pdfcraft_content::parse(b"BT (a) Tj ET q /Im Do Q BT (b) Tj ET BI /W 1 ID x EI /Sh sh").ops;
+    let at = |name: &str, n: usize| ops.iter().enumerate().filter(|(_, o)| o.is(name)).nth(n).map(|(i, _)| i).unwrap();
+    let after_bi = at("BI", 0) + 1;
+    assert!(revealed_under_paint(true, &ops, at("BT", 0)));
+    assert!(revealed_under_paint(true, &ops, at("BT", 1)), "inline image and shading after it");
+    assert!(revealed_under_paint(true, &ops, after_bi), "a shading after it");
+    assert!(!revealed_under_paint(true, &ops, ops.len()), "nothing after it");
+    assert!(!revealed_under_paint(true, &ops, ops.len() + 5), "past the end");
+    assert!(!revealed_under_paint(false, &ops, 0), "visible text stays where it is");
+    let text_only = pdfcraft_content::parse(b"BT (a) Tj ET 0 0 10 10 re f").ops;
+    assert!(!revealed_under_paint(true, &text_only, 0), "a filled path does not move it");
+}
+
 /// Revealed OCR text may have to go on top of the page; a page whose marked content nests too deep
 /// for that is refused before either rewrite path changes anything.
 #[test]
