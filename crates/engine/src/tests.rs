@@ -7054,6 +7054,30 @@ fn xfa_scripts_can_remove_rows_twice_and_reset_fields_by_name() {
     assert_eq!(value(&s, "price"), vec!["9".to_string()]);
 }
 
+/// A repeating subform bound with `match="none"` has no data node of its own, so adding or
+/// removing one of its instances must leave the data alone, never its parent's group.
+#[test]
+fn xfa_instances_of_an_unbound_subform_leave_the_data_alone() {
+    let tpl = pdfcraft_xfa::fixtures::scripted_template().replace(
+        r#"<subform name="row" layout="row"><occur min="1" max="-1"/>"#,
+        r#"<subform name="row" layout="row"><bind match="none"/><occur min="1" max="-1"/>"#,
+    );
+    let bytes = Arc::new(pdfcraft_xfa::fixtures::shell(&tpl));
+    let mut s = Session::new().with_clock(|| 1_700_000_000);
+    let id = s.open("unbound.pdf", None, bytes, None).expect("opens");
+    s.apply(id, Edit::SetFieldValue { name: "qty".into(), value: FieldValue::Text("4".into()) }).unwrap();
+    let tables = |s: &Session| {
+        let cos = pdfcraft_cos::Document::open(s.get(id).unwrap().bytes.clone()).unwrap();
+        pdfcraft_xfa::data_of(&cos).map_or(0, |d| d.count(&pdfcraft_xfa::som_to_path("form[0].page1[0]"), "table"))
+    };
+    let before = tables(&s);
+    assert!(before <= 1, "{before}");
+    s.run_javascript(id, "", Some("addRow")).unwrap();
+    s.run_javascript(id, "", Some("removeRow")).unwrap();
+    assert_eq!(tables(&s), before, "the parent's group was neither copied nor removed");
+    assert_eq!(s.get(id).unwrap().form.iter().find(|f| f.name == "qty").unwrap().value, vec!["4".to_string()]);
+}
+
 /// Streams in `bytes` (every revision) that hold an XFA datasets packet.
 fn datasets_streams(bytes: &Arc<Vec<u8>>) -> usize {
     let cos = pdfcraft_cos::Document::open(bytes.clone()).unwrap();

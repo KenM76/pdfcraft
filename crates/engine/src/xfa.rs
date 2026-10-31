@@ -175,9 +175,15 @@ fn count_instances(root: &FormNode, parent_som: &str, name: &str) -> usize {
 }
 
 /// An instance SOM (`…table[0].row[2]`) split into its parent's data path (areas left out,
-/// see [`pdfcraft_xfa::data_path`]) and SOM, its name and its index.
+/// see [`pdfcraft_xfa::data_path`]) and SOM, its name and its index. `None` when the instance
+/// has no data node of its own (a subform bound with `match="none"`): the last data segment
+/// is then an ancestor, and adding or removing it would touch that ancestor's data.
 fn split_instance(tpl: &Template, som: &str) -> Option<(pdfcraft_xfa::DataPath, String, String, usize)> {
     let mut path = pdfcraft_xfa::data_path(tpl, som);
+    let own = pdfcraft_xfa::som_to_path(som).pop()?;
+    if path.last() != Some(&own) {
+        return None;
+    }
     let (name, index) = path.pop()?;
     let parent_som = som.rsplit_once('.').map(|(p, _)| p).unwrap_or("").to_string();
     Some((path, parent_som, name, index))

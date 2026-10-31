@@ -44,8 +44,8 @@ pub fn som_to_path(som: &str) -> DataPath {
 /// An area is a named container in the form, so it is part of SOM expressions, but only
 /// subforms, exclusion groups and fields are data scopes: what an area holds binds under the
 /// area's parent, as Adobe's viewers write it. A subform bound with `match="none"` is no data
-/// scope either. The template tells which segments are areas;
-/// segments it doesn't have (page-set objects, or a SOM from another template) are kept.
+/// scope either. The template tells which segments are which; segments it doesn't have
+/// (page-set objects, or a SOM from another template) are kept.
 pub fn data_path(tpl: &Template, som: &str) -> DataPath {
     let mut out = DataPath::new();
     // The template children the next segment is looked up in; `None` until the root matched,
