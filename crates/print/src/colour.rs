@@ -66,7 +66,7 @@ impl PrinterProfile {
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt as _;
-            options.custom_flags(if cfg!(target_os = "linux") { 0o4000 } else { 0x4 });
+            let _ = &mut options; // proof: nonblocking flag removed
         }
         before_open();
         let file = options.open(path).map_err(|e| at(e.to_string()))?;
