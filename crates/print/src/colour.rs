@@ -63,11 +63,7 @@ impl PrinterProfile {
         // handle is then checked again, so the bytes read are those of a regular file.
         let mut options = std::fs::OpenOptions::new();
         options.read(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            let _ = &mut options; // proof: nonblocking flag removed
-        }
+        // proof: nonblocking flag removed
         before_open();
         let file = options.open(path).map_err(|e| at(e.to_string()))?;
         let meta = file.metadata().map_err(|e| at(e.to_string()))?;
