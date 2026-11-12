@@ -5,12 +5,16 @@
 //!
 //! The pages go as converted pictures, so the driver's own colour management should be off for
 //! the job; otherwise the printer converts them a second time.
+//!
+//! A [`Proof`] makes the printer show a press condition (a hard proof): the colours go into the
+//! press profile first and from there onto the printer, optionally with the press's paper white
+//! and black ink.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 pub use craft_cms::Intent;
-use craft_cms::{Builtin, ColorSpace, Profile, TransformOptions};
+use craft_cms::{Builtin, ColorSpace, Profile, Transform, TransformOptions};
 
 /// The largest profile read from disk. Printer profiles with large tables are a few megabytes.
 pub const MAX_PROFILE_BYTES: u64 = 32 << 20;
@@ -51,34 +55,8 @@ impl PrinterProfile {
     /// [`PrinterProfile::read`], running `before_open` between the path check and the open:
     /// where a test swaps the file.
     fn read_checked(path: &Path, before_open: impl FnOnce()) -> Result<PrinterProfile, String> {
-        let at = |e: String| format!("{}: {e}", path.display());
-        let meta = std::fs::metadata(path).map_err(|e| at(e.to_string()))?;
-        if !meta.is_file() {
-            return Err(at("not a regular file".into()));
-        }
-        if meta.len() > MAX_PROFILE_BYTES {
-            return Err(at(too_large()));
-        }
-        // Nonblocking on Unix, so a FIFO swapped in after the check does not block the open; the
-        // handle is then checked again, so the bytes read are those of a regular file.
-        let mut options = std::fs::OpenOptions::new();
-        options.read(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            options.custom_flags(if cfg!(target_os = "linux") { 0o4000 } else { 0x4 });
-        }
-        before_open();
-        let file = options.open(path).map_err(|e| at(e.to_string()))?;
-        let meta = file.metadata().map_err(|e| at(e.to_string()))?;
-        if !meta.is_file() {
-            return Err(at("not a regular file".into()));
-        }
-        if meta.len() > MAX_PROFILE_BYTES {
-            return Err(at(too_large()));
-        }
-        let bytes = read_limited(file, MAX_PROFILE_BYTES).map_err(at)?;
-        PrinterProfile::from_bytes(&bytes).map_err(at)
+        let bytes = read_icc(path, before_open)?;
+        PrinterProfile::from_bytes(&bytes).map_err(|e| format!("{}: {e}", path.display()))
     }
 
     /// The profile's description (its `desc` tag), possibly empty.
@@ -95,6 +73,112 @@ impl PrinterProfile {
     pub fn is_gray(&self) -> bool {
         self.profile.color_space == ColorSpace::Gray
     }
+}
+
+/// The bytes of the ICC file at `path`, at most [`MAX_PROFILE_BYTES`] long, running `before_open`
+/// between the path check and the open. Anything but a regular file (links followed) is refused
+/// before it is opened: opening a FIFO or a device can wait forever. Errors name the path.
+fn read_icc(path: &Path, before_open: impl FnOnce()) -> Result<Vec<u8>, String> {
+    let at = |e: String| format!("{}: {e}", path.display());
+    let meta = std::fs::metadata(path).map_err(|e| at(e.to_string()))?;
+    if !meta.is_file() {
+        return Err(at("not a regular file".into()));
+    }
+    if meta.len() > MAX_PROFILE_BYTES {
+        return Err(at(too_large()));
+    }
+    // Nonblocking on Unix, so a FIFO swapped in after the check does not block the open; the
+    // handle is then checked again, so the bytes read are those of a regular file.
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(if cfg!(target_os = "linux") { 0o4000 } else { 0x4 });
+    }
+    before_open();
+    let file = options.open(path).map_err(|e| at(e.to_string()))?;
+    let meta = file.metadata().map_err(|e| at(e.to_string()))?;
+    if !meta.is_file() {
+        return Err(at("not a regular file".into()));
+    }
+    if meta.len() > MAX_PROFILE_BYTES {
+        return Err(at(too_large()));
+    }
+    read_limited(file, MAX_PROFILE_BYTES).map_err(at)
+}
+
+/// A press condition a print can simulate: an RGB, grey or CMYK ICC profile that converts both
+/// ways (colours go into it, then out of it onto the printer).
+#[derive(Clone, Debug, PartialEq)]
+pub struct PressProfile {
+    profile: Arc<Profile>,
+    name: String,
+}
+
+impl PressProfile {
+    /// `bytes` as a press profile. Refused when they are not an ICC profile, when its device space
+    /// is not RGB, grey or CMYK, or when it lacks a table for either direction.
+    pub fn from_bytes(bytes: &[u8]) -> Result<PressProfile, String> {
+        let profile = Profile::parse(bytes).map_err(|e| format!("not a usable ICC profile: {e}"))?;
+        PressProfile::from_profile(profile)
+    }
+
+    /// The built-in press conditions (the CMYK built-in profiles), with their ids, made once.
+    pub fn builtins() -> &'static [(&'static str, PressProfile)] {
+        static BUILTINS: OnceLock<Vec<(&'static str, PressProfile)>> = OnceLock::new();
+        BUILTINS.get_or_init(|| {
+            Builtin::ALL
+                .into_iter()
+                .filter(|b| b.profile().color_space == ColorSpace::Cmyk)
+                .filter_map(|b| Some((b.id(), PressProfile::from_profile(b.profile().clone()).ok()?)))
+                .collect()
+        })
+    }
+
+    /// The built-in press condition `name` names, by id or description, ignoring case.
+    pub fn builtin_named(name: &str) -> Option<PressProfile> {
+        let name = name.trim();
+        PressProfile::builtins().iter().find(|(id, p)| id.eq_ignore_ascii_case(name) || p.name.eq_ignore_ascii_case(name)).map(|(_, p)| p.clone())
+    }
+
+    /// The profile in the file at `path`, read as [`PrinterProfile::read`] reads one, named by
+    /// its file when its description is empty.
+    pub fn read(path: &Path) -> Result<PressProfile, String> {
+        let bytes = read_icc(path, || {})?;
+        let mut press = PressProfile::from_bytes(&bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+        if press.name.is_empty() {
+            press.name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        }
+        Ok(press)
+    }
+
+    fn from_profile(profile: Profile) -> Result<PressProfile, String> {
+        if !matches!(profile.color_space, ColorSpace::Rgb | ColorSpace::Gray | ColorSpace::Cmyk) {
+            return Err(format!("a {:?} profile can't be simulated: choose an RGB, grey or CMYK press profile", profile.color_space));
+        }
+        if !profile.can_be_destination() || profile.device_to_pcs(Intent::RelativeColorimetric).is_err() {
+            return Err("a press profile must convert colours both into and out of the press: this one has a table for one way only".into());
+        }
+        let name = profile.description.trim().to_string();
+        Ok(PressProfile { profile: Arc::new(profile), name })
+    }
+
+    /// The profile's description (its `desc` tag), possibly empty.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+/// Simulating a press on the printer: the colours go into `press` with the print's rendering
+/// intent and black point compensation, then from the press onto the printer. With
+/// `simulate_paper` that second step is absolute colorimetric, so the press's paper white and
+/// black ink print as they are (Acrobat's Simulate Paper Color, which also simulates the black
+/// ink); without it the press's white and black map onto the printer's.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Proof {
+    pub press: PressProfile,
+    pub simulate_paper: bool,
 }
 
 /// At most `limit` bytes of `source`: a file that grew after it was measured is refused, not read
@@ -114,21 +198,31 @@ fn too_large() -> String {
 }
 
 /// App-managed colour: the profile the pages are converted into, how, and whether black point
-/// compensation maps the darkest sRGB black onto the printer's darkest black.
+/// compensation maps the darkest sRGB black onto the printer's darkest black (the press's, with a
+/// proof); and the press condition to simulate, if any.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ManagedColour {
     pub profile: PrinterProfile,
     pub intent: Intent,
     pub black_point: bool,
+    pub proof: Option<Proof>,
 }
 
 impl ManagedColour {
     /// Converts opaque sRGB pixels (RGBA, alpha ignored and kept) into the printer profile in
     /// place. A grey profile's value is written to all three channels.
     pub fn convert(&self, rgba: &mut [u8]) -> Result<(), String> {
-        let opts = TransformOptions { intent: self.intent, bpc: self.black_point, ..TransformOptions::default() };
-        let t = craft_cms::cached(Builtin::Srgb.profile(), &self.profile.profile, opts)
-            .map_err(|e| format!("can't convert into the printer profile: {e}"))?;
+        let t = match &self.proof {
+            None => {
+                let opts = TransformOptions { intent: self.intent, bpc: self.black_point, ..TransformOptions::default() };
+                craft_cms::cached(Builtin::Srgb.profile(), &self.profile.profile, opts)
+                    .map_err(|e| format!("can't convert into the printer profile: {e}"))?
+            }
+            Some(p) => Arc::new(
+                Transform::proof(Builtin::Srgb.profile(), &p.press.profile, &self.profile.profile, self.intent, self.black_point, p.simulate_paper)
+                    .map_err(|e| format!("can't simulate the press profile on the printer: {e}"))?,
+            ),
+        };
         let source = rgba.to_vec();
         if self.profile.is_gray() {
             let mut grey = vec![0u8; source.len() / 4];
@@ -325,7 +419,12 @@ mod tests {
     }
 
     fn convert(profile: &[u8], bpc: bool, rgba: &[u8]) -> Vec<u8> {
-        let colour = ManagedColour { profile: PrinterProfile::from_bytes(profile).unwrap(), intent: Intent::RelativeColorimetric, black_point: bpc };
+        let colour = ManagedColour {
+            profile: PrinterProfile::from_bytes(profile).unwrap(),
+            intent: Intent::RelativeColorimetric,
+            black_point: bpc,
+            proof: None,
+        };
         let mut out = rgba.to_vec();
         colour.convert(&mut out).unwrap();
         out
@@ -355,6 +454,68 @@ mod tests {
         assert!(out[4..7].iter().all(|&v| v >= 254), "white stays white: {out:?}");
         let same = convert(&Builtin::Srgb.profile().to_bytes(), true, &[10, 120, 230, 255]);
         assert!(same.iter().zip([10u8, 120, 230, 255]).all(|(a, b)| a.abs_diff(b) <= 1), "sRGB into sRGB: {same:?}");
+    }
+
+    fn press() -> PressProfile {
+        PressProfile::builtin_named("coated-cmyk").unwrap()
+    }
+
+    fn proofed(simulate_paper: bool, rgba: &[u8]) -> Vec<u8> {
+        let colour = ManagedColour {
+            profile: PrinterProfile::from_bytes(&Builtin::Srgb.profile().to_bytes()).unwrap(),
+            intent: Intent::RelativeColorimetric,
+            black_point: true,
+            proof: Some(Proof { press: press(), simulate_paper }),
+        };
+        let mut out = rgba.to_vec();
+        colour.convert(&mut out).unwrap();
+        out
+    }
+
+    /// A press proof prints the press's colours: sRGB's pure blue is outside a coated press's
+    /// gamut, so on an sRGB printer it comes out duller than without the proof; alpha is kept.
+    #[test]
+    fn a_press_proof_prints_the_press_colours_on_the_printer() {
+        let blue = [0u8, 0, 255, 200];
+        assert!(convert(&Builtin::Srgb.profile().to_bytes(), true, &blue).iter().zip(blue).all(|(a, b)| a.abs_diff(b) <= 1));
+        let out = proofed(false, &blue);
+        assert!(out[0] > 20 && out[2] < 240, "the press's blue: {out:?}");
+        assert_eq!(out[3], 200);
+    }
+
+    /// Without paper simulation the press's white and black map onto the printer's (black to
+    /// within a few levels, through the press's ink); with it the paper prints as its own tint,
+    /// darker than the printer's white, and the black ink as a clearly lifted black.
+    #[test]
+    fn simulating_paper_prints_the_press_paper_and_black_ink() {
+        let (white, black) = ([255u8, 255, 255, 255], [0u8, 0, 0, 255]);
+        let plain = proofed(false, &[white, black].concat());
+        assert!(plain[..3].iter().all(|&v| v >= 254), "white stays the printer's white: {plain:?}");
+        assert!(plain[4..7].iter().all(|&v| v <= 8), "black stays the printer's black: {plain:?}");
+        let paper = proofed(true, &[white, black].concat());
+        assert!(paper[..3].iter().all(|&v| v < 253), "the paper's white: {paper:?}");
+        assert!(paper[4..7].iter().zip(&plain[4..7]).all(|(&v, &p)| v > p + 10), "the black ink's black: {paper:?} {plain:?}");
+    }
+
+    /// Press profiles are RGB, grey or CMYK ones that convert both ways; the built-in ones are
+    /// the CMYK press conditions, found by id or description.
+    #[test]
+    fn press_profiles_are_rgb_grey_or_cmyk_ones_that_convert_both_ways() {
+        assert!(PressProfile::from_bytes(&Builtin::CoatedCmyk.profile().to_bytes()).is_ok());
+        assert!(PressProfile::from_bytes(&Builtin::Srgb.profile().to_bytes()).is_ok());
+        assert!(PressProfile::from_bytes(&Builtin::GrayGamma22.profile().to_bytes()).is_ok());
+        assert!(PressProfile::from_bytes(&Builtin::LabD50.profile().to_bytes()).is_err(), "Lab is no press");
+        let mut into_only = Builtin::CoatedCmyk.profile().clone();
+        into_only.a2b = [None, None, None];
+        assert!(PressProfile::from_profile(into_only).unwrap_err().contains("both into and out of"));
+        let mut out_of_only = Builtin::CoatedCmyk.profile().clone();
+        out_of_only.b2a = [None, None, None];
+        assert!(PressProfile::from_profile(out_of_only).unwrap_err().contains("both into and out of"));
+        assert!(PressProfile::from_bytes(b"not a profile").is_err());
+        let ids: Vec<&str> = PressProfile::builtins().iter().map(|(id, _)| *id).collect();
+        assert_eq!(ids, ["coated-cmyk", "coated-fogra39"]);
+        assert!(PressProfile::builtin_named(&Builtin::CoatedFogra39.description().to_uppercase()).is_some());
+        assert!(PressProfile::builtin_named("srgb").is_none(), "only the press conditions");
     }
 
     #[test]

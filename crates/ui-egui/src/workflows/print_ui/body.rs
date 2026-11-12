@@ -148,6 +148,7 @@ fn colour_handling(ui: &mut egui::Ui, d: &mut PrintDraft, t: &Tokens) {
             combo(ui, "print-intent", tl!("Rendering intent:"), &mut c.intent, &intents, 180.0);
         });
         ui.add(widgets::checkbox(&mut c.black_point, tl!("Black point compensation")));
+        press_simulation(ui, c);
         ui.label(
             egui::RichText::new(tl!("The pages print as pictures in this profile. Turn the printer's own color management off in its Properties."))
                 .small()
@@ -156,6 +157,40 @@ fn colour_handling(ui: &mut egui::Ui, d: &mut PrintDraft, t: &Tokens) {
     }
     if let Some(e) = &d.colour_error {
         ui.label(egui::RichText::new(crate::i18n::fmt(tl!("Can't print into that profile: {e}"), &[("e", e)])).small().color(t.text_muted));
+    }
+}
+
+/// Color Handling's press simulation: none, or a built-in press condition the printer simulates,
+/// with or without its paper white and black ink.
+fn press_simulation(ui: &mut egui::Ui, c: &mut print::colour::ManagedColour) {
+    let presses = print::colour::PressProfile::builtins();
+    let none = tl!("No press simulation");
+    let shown = c.proof.as_ref().map_or_else(|| none.to_string(), |p| p.press.name().to_string());
+    let mut chosen: Option<Option<print::colour::PressProfile>> = None;
+    ui.horizontal(|ui| {
+        let caption = ui.label(tl!("Simulate:"));
+        craft_ui::ComboBox::from_id_salt("print-simulate")
+            .selected_text(shown)
+            .width(260.0)
+            .show_ui(ui, |ui| {
+                if ui.selectable_label(c.proof.is_none(), none).clicked() {
+                    chosen = Some(None);
+                }
+                for (_, press) in presses {
+                    if ui.selectable_label(c.proof.as_ref().is_some_and(|p| p.press.name() == press.name()), press.name()).clicked() {
+                        chosen = Some(Some(press.clone()));
+                    }
+                }
+            })
+            .response
+            .labelled_by(caption.id);
+    });
+    if let Some(press) = chosen {
+        let simulate_paper = c.proof.as_ref().is_some_and(|p| p.simulate_paper);
+        c.proof = press.map(|press| print::colour::Proof { press, simulate_paper });
+    }
+    if let Some(p) = &mut c.proof {
+        ui.add(widgets::checkbox(&mut p.simulate_paper, tl!("Simulate paper color and black ink")));
     }
 }
 

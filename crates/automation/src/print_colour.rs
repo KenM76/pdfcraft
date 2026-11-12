@@ -1,7 +1,7 @@
 //! App-managed print colour for `doc_print` (`color_management` app) and the installed printer
 //! profiles it can name (`print_color_profiles`).
 
-use pdfcraft_engine::print::colour::{self, Intent, ManagedColour, PrinterProfile};
+use pdfcraft_engine::print::colour::{self, Intent, ManagedColour, PressProfile, PrinterProfile, Proof};
 use serde_json::{Value, json};
 
 use crate::{Args, Automation, Result, ToolError, failed};
@@ -13,14 +13,17 @@ fn bad(m: impl Into<String>) -> ToolError {
 
 impl Automation {
     /// `doc_print`'s colour handling: `None` for `printer` (the default), else the profile, intent
-    /// and black point compensation the pictures are converted with.
+    /// and black point compensation the pictures are converted with, and the press condition
+    /// (`simulate_profile`, `simulate_paper`) they simulate.
     pub(crate) fn managed_colour(&self, a: &Args) -> Result<Option<ManagedColour>> {
         let app = match a.opt_str("color_management")?.unwrap_or("printer") {
             "printer" => false,
             "app" => true,
             m => return Err(bad(format!("unknown color_management {m:?}: printer (the printer manages colour) or app"))),
         };
-        let asked = ["color_profile", "rendering_intent", "black_point_compensation"].into_iter().find(|k| a.get(k).is_some());
+        let asked = ["color_profile", "rendering_intent", "black_point_compensation", "simulate_profile", "simulate_paper"]
+            .into_iter()
+            .find(|k| a.get(k).is_some());
         if !app {
             return match asked {
                 Some(k) => Err(bad(format!("{k} needs color_management app"))),
@@ -38,7 +41,28 @@ impl Automation {
             }
         };
         let black_point = a.opt_bool("black_point_compensation")?.unwrap_or(true);
-        Ok(Some(ManagedColour { profile, intent, black_point }))
+        let proof = match a.opt_str("simulate_profile")? {
+            Some(name) => Some(Proof { press: self.press_profile(name)?, simulate_paper: a.opt_bool("simulate_paper")?.unwrap_or(false) }),
+            None if a.get("simulate_paper").is_some() => return Err(bad("simulate_paper needs simulate_profile")),
+            None => None,
+        };
+        Ok(Some(ManagedColour { profile, intent, black_point, proof }))
+    }
+
+    /// The press condition `name` names: an ICC file, else a built-in press condition.
+    fn press_profile(&self, name: &str) -> Result<PressProfile> {
+        let file = self.resolve_for(name, crate::file_access::Access::Read, true);
+        if let Ok(path) = &file
+            && path.is_file()
+        {
+            return PressProfile::read(path).map_err(bad);
+        }
+        if let Some(p) = PressProfile::builtin_named(name) {
+            return Ok(p);
+        }
+        file?;
+        let builtins: Vec<&str> = PressProfile::builtins().iter().map(|(id, _)| *id).collect();
+        Err(bad(format!("simulate_profile {name:?} is neither a built-in press condition ({}) nor an ICC file", builtins.join(", "))))
     }
 
     /// The profile `name` names: an ICC file, else an installed profile's name or file name. A

@@ -990,6 +990,30 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The press Color Handling simulates goes to the printed pictures with its paper choice, and
+    /// stays chosen when the printer profile changes.
+    #[test]
+    fn color_handling_simulates_a_press() {
+        let dir = std::env::temp_dir().join(format!("pdfcraft-print-proof-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let wide = dir.join("wide.icc");
+        std::fs::write(&wide, craft_cms::Builtin::AdobeRgbCompat.profile().to_bytes().as_slice()).unwrap();
+        let srgb = dir.join("srgb.icc");
+        std::fs::write(&srgb, craft_cms::Builtin::Srgb.profile().to_bytes().as_slice()).unwrap();
+        let (_, press) = print::colour::PressProfile::builtins().first().cloned().expect("a built-in press condition");
+
+        let mut draft = PrintDraft::default();
+        draft.choose_colour_profile(Some(&wide));
+        if let Some(c) = &mut draft.colour {
+            c.proof = Some(print::colour::Proof { press: press.clone(), simulate_paper: true });
+        }
+        draft.choose_colour_profile(Some(&srgb));
+        let colour = draft.settings(1, &[]).unwrap().raster.and_then(|r| r.colour).expect("the pictures go into the profile");
+        assert_eq!(colour.profile.name(), craft_cms::Builtin::Srgb.profile().description.trim());
+        assert_eq!(colour.proof, Some(print::colour::Proof { press, simulate_paper: true }), "the press stays chosen");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn composed_sheets_keep_exact_scaling_and_the_dialogs_duplex_choice() {
         let draft = PrintDraft { duplex: Some(spool::Duplex::LongEdge), ..PrintDraft::default() };

@@ -8539,11 +8539,11 @@ title = "Simulate paper colour and black ink"
 area = "L"
 tier = "P2"
 milestone = "M11"
-status = "planned"
+status = "partial"
 commands = []
-tools = []
-evidence = []
-notes = ""
+tools = ["doc_print"]
+evidence = ["crates/print/src/colour.rs::a_press_proof_prints_the_press_colours_on_the_printer", "crates/print/src/colour.rs::simulating_paper_prints_the_press_paper_and_black_ink", "crates/print/src/colour.rs::press_profiles_are_rgb_grey_or_cmyk_ones_that_convert_both_ways", "crates/automation/tests/it/automation.rs::doc_print_simulates_a_press_through_tools", "crates/ui-egui/src/workflows/print_ui.rs::color_handling_simulates_a_press"]
+notes = "With app-managed colour (print.color-handling), doc_print simulate_profile makes the printer simulate a press condition (a hard proof): the pictures go from sRGB into the press profile with the print's rendering intent and black point compensation, then onto the printer profile; simulate_paper prints the press's paper white and black ink as they are (absolute colorimetric for that step) instead of mapping them onto the printer's. The press is a built-in coated CMYK condition or an RGB, grey or CMYK ICC file. The Print dialog's Color handling offers the built-in ones and the paper checkbox. Still missing against Acrobat: installed CMYK profiles by name and in the dialog, the document's output intent as the press, and simulating without printing the pages as pictures."
 
 [[feature]]
 id = "print.overprint-preview"

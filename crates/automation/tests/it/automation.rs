@@ -12553,6 +12553,67 @@ fn doc_print_with_app_managed_colour() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `doc_print` `simulate_profile` makes the printer simulate a press (a hard proof), built in or
+/// from an ICC file, and `simulate_paper` prints its paper white: the printed picture changes, and
+/// the result says what was simulated.
+#[test]
+fn doc_print_simulates_a_press_through_tools() {
+    let dir = workdir("print-proof");
+    std::fs::write(dir.join("srgb.icc"), craft_cms::Builtin::Srgb.profile().to_bytes().as_slice()).unwrap();
+    std::fs::write(dir.join("press.icc"), craft_cms::Builtin::CoatedFogra39.profile().to_bytes().as_slice()).unwrap();
+    std::fs::write(dir.join("lab.icc"), craft_cms::Builtin::LabD50.profile().to_bytes().as_slice()).unwrap();
+    let mut a = auto(&dir);
+    let doc = ok(&mut a, "doc_open", json!({ "path": "a.pdf" }))["doc"].as_u64().unwrap();
+    let args = |extra: Value| {
+        let mut v = json!({ "doc": doc, "pages": "1", "dpi": 72, "path": "proof.pdf", "color_management": "app", "color_profile": "srgb.icc" });
+        v.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        v
+    };
+    let picture = |a: &mut Automation, extra: Value| {
+        let r = ok(a, "doc_print", args(extra));
+        let out = pdfcraft_cos::Document::open(std::sync::Arc::new(std::fs::read(dir.join("proof.pdf")).unwrap())).unwrap();
+        let raw = out.scan_objects().find_map(|(_, o)| match &*o {
+            pdfcraft_cos::Object::Stream(s) if s.dict.name(b"Subtype") == Some(b"Image") => Some(s.raw.to_vec()),
+            _ => None,
+        });
+        (r, raw.expect("the page prints as a picture"))
+    };
+    let (r, plain) = picture(&mut a, json!({}));
+    assert!(r["color_management"]["simulate"].is_null(), "no press unless asked: {r}");
+    let (r, press) = picture(&mut a, json!({ "simulate_profile": "coated-cmyk" }));
+    assert_eq!(r["color_management"]["simulate"]["profile"], craft_cms::Builtin::CoatedCmyk.profile().description.trim(), "{r}");
+    assert_eq!(r["color_management"]["simulate"]["paper"], false, "{r}");
+    let (r, paper) = picture(&mut a, json!({ "simulate_profile": "coated-cmyk", "simulate_paper": true }));
+    assert_eq!(r["color_management"]["simulate"]["paper"], true, "{r}");
+    assert_ne!(paper, plain, "the press's paper white prints");
+    assert_ne!(paper, press, "simulating the paper changes the picture");
+    let (r, _) = picture(&mut a, json!({ "simulate_profile": "press.icc" }));
+    assert_eq!(r["color_management"]["simulate"]["profile"], craft_cms::Builtin::CoatedFogra39.profile().description.trim(), "{r}");
+    for (extra, says) in [
+        (json!({ "simulate_profile": "lab.icc" }), "RGB, grey or CMYK"),
+        (json!({ "simulate_profile": "newsprint" }), "coated-cmyk, coated-fogra39"),
+        (json!({ "simulate_paper": true }), "simulate_paper needs simulate_profile"),
+        (json!({ "simulate_profile": "coated-cmyk", "simulate_paper": "yes" }), "simulate_paper"),
+    ] {
+        match a.call("doc_print", &args(extra.clone())) {
+            Err(ToolError::InvalidArgs(m)) => assert!(m.contains(says), "{extra}: {m}"),
+            other => panic!("{extra}: {other:?}"),
+        }
+    }
+    let outside = dir.with_extension("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("press.icc"), craft_cms::Builtin::CoatedFogra39.profile().to_bytes().as_slice()).unwrap();
+    let away = outside.join("press.icc").to_string_lossy().into_owned();
+    assert!(a.call("doc_print", &args(json!({ "simulate_profile": away }))).is_err(), "a press profile outside the root isn't read");
+    let _ = std::fs::remove_dir_all(&outside);
+    let printer = json!({ "doc": doc, "pages": "1", "dpi": 72, "path": "proof.pdf", "simulate_profile": "coated-cmyk" });
+    match a.call("doc_print", &printer) {
+        Err(ToolError::InvalidArgs(m)) => assert!(m.contains("simulate_profile needs color_management app"), "{m}"),
+        other => panic!("{other:?}"),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Under `--root`, a profile link inside the root that leads out of it is neither listed nor
 /// found by name.
 #[test]
@@ -12581,6 +12642,8 @@ fn colour_profile_links_out_of_the_root_are_not_read() {
     let doc = ok(&mut a, "doc_open", json!({ "path": "a.pdf" }))["doc"].as_u64().unwrap();
     let print = json!({ "doc": doc, "pages": "1", "dpi": 72, "path": "m.pdf", "color_management": "app", "color_profile": "leak" });
     assert!(a.call("doc_print", &print).is_err(), "a link out of the root isn't found by name");
+    let press = json!({ "doc": doc, "pages": "1", "dpi": 72, "path": "m.pdf", "color_management": "app", "color_profile": "wide.icc", "simulate_profile": "leak.icc" });
+    assert!(a.call("doc_print", &press).is_err(), "a press profile linked out of the root isn't read");
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(&outside);
 }

@@ -11369,6 +11369,7 @@ fn app_managed_colour_converts_the_printed_pictures() {
         profile: print::colour::PrinterProfile::from_bytes(&wide).unwrap(),
         intent: print::colour::Intent::RelativeColorimetric,
         black_point: true,
+        proof: None,
     };
     let middle = |colour: Option<print::colour::ManagedColour>| {
         let settings = print::Settings {

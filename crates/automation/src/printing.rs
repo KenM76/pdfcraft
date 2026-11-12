@@ -397,6 +397,9 @@ impl Automation {
         if let Some(c) = settings.raster.as_ref().and_then(|r| r.colour.as_ref()) {
             out["color_management"] =
                 json!({ "profile": c.profile.name(), "rendering_intent": c.intent.id(), "black_point_compensation": c.black_point });
+            if let Some(p) = &c.proof {
+                out["color_management"]["simulate"] = json!({ "profile": p.press.name(), "paper": p.simulate_paper });
+            }
         }
         if !scripts.is_empty() {
             out["will_print"] = crate::a11y::form_tools::js_output_json(&scripts);

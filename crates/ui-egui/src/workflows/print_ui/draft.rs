@@ -539,9 +539,9 @@ impl PrintDraft {
         };
         match print::colour::PrinterProfile::read(path) {
             Ok(profile) => {
-                let (intent, black_point) =
-                    self.colour.as_ref().map_or((print::colour::Intent::RelativeColorimetric, true), |c| (c.intent, c.black_point));
-                self.colour = Some(print::colour::ManagedColour { profile, intent, black_point });
+                let (intent, black_point, proof) =
+                    self.colour.take().map_or((print::colour::Intent::RelativeColorimetric, true, None), |c| (c.intent, c.black_point, c.proof));
+                self.colour = Some(print::colour::ManagedColour { profile, intent, black_point, proof });
                 self.colour_path = Some(path.to_path_buf());
             }
             Err(e) => self.colour_error = Some(e),
