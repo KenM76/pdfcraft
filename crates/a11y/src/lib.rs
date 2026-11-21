@@ -15,6 +15,7 @@ use pdfcraft_cos::Document;
 mod alt;
 mod autotag;
 mod autotag_fields;
+mod autotag_order;
 mod autotag_roles;
 mod autotag_tables;
 mod content;

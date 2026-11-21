@@ -3,15 +3,16 @@
 //! Each text object becomes a paragraph, or a heading when its size or weight sets it apart from
 //! the body text ([`crate::autotag_roles`]); either can be retagged with the existing tag-property
 //! tool after human review. Rows of single-line text objects that line up in columns become
-//! `Table` › `TR` › `TH`/`TD` ([`crate::autotag_tables`]). Painted paths, shadings and images
-//! outside text objects are wrapped in `/Artifact BMC … EMC` so the resulting page passes the
-//! tagged-content check.
+//! `Table` › `TR` › `TH`/`TD` ([`crate::autotag_tables`]). A page set in columns is tagged down
+//! each column ([`crate::autotag_order`]). Painted paths, shadings and images outside text objects
+//! are wrapped in `/Artifact BMC … EMC` so the resulting page passes the tagged-content check.
 
 use std::collections::{HashMap, HashSet};
 
 use pdfcraft_content::{Op, Pieces, serialize_ops};
 use pdfcraft_cos::{DecodeBudget, Dict, Document, ObjRef, Object, Stream};
 
+use crate::autotag_order;
 use crate::autotag_roles::{self, Evidence};
 use crate::autotag_tables::{self, Candidate};
 
@@ -54,6 +55,8 @@ struct Plan {
     evidence: Vec<Evidence>,
     artifacts: HashMap<usize, usize>,
     tables: Vec<Candidate>,
+    /// The text objects, by index into `spans`, in reading order.
+    order: Vec<usize>,
 }
 
 fn unsupported(page: usize, reason: impl Into<String>) -> AutoTagError {
@@ -274,8 +277,15 @@ fn plan_page(
     let resources = page_fonts(doc, &page.dict);
     let evidence = autotag_roles::evidence(doc, fonts, &resources, &parsed.ops, &spans);
     // Rows are read along user-space x, which a rotated page does not display as rows.
-    let tables = if page.rotation(doc) == 0 { autotag_tables::find(&evidence) } else { Vec::new() };
-    Ok(Plan { page: page.obj, ops: parsed.ops, spans, evidence, artifacts, tables })
+    let upright = page.rotation(doc) == 0;
+    let tables = if upright { autotag_tables::find(&evidence) } else { Vec::new() };
+    // Columns, like rows, are found along user-space axes.
+    let order = upright
+        .then(|| autotag_order::reading_order(&evidence, &tables))
+        .flatten()
+        .filter(|o| autotag_order::is_permutation(o, spans.len()))
+        .unwrap_or_else(|| (0..spans.len()).collect());
+    Ok(Plan { page: page.obj, ops: parsed.ops, spans, evidence, artifacts, tables, order })
 }
 
 fn plan(doc: &Document) -> Result<Vec<Plan>, AutoTagError> {
@@ -404,18 +414,23 @@ pub fn table_candidates(doc: &Document) -> Result<Vec<TableCandidate>, AutoTagEr
 pub fn autotag_text(doc: &mut Document) -> Result<AutoTagResult, AutoTagError> {
     let plans = plan(doc)?;
     // Table cells are left out of the body style and the heading levels, as they are out of the roles.
+    // Levels are ranked in reading order, the order the tree is read in, so none is skipped there.
     let in_tables: Vec<HashSet<usize>> = plans.iter().map(|p| autotag_tables::tabled(&p.tables)).collect();
-    let all: Vec<Evidence> = plans
-        .iter()
-        .zip(&in_tables)
-        .flat_map(|(p, cells)| p.evidence.iter().enumerate().filter(|(i, _)| !cells.contains(i)).map(|(_, e)| *e))
-        .collect();
+    let read: Vec<Vec<usize>> =
+        plans.iter().zip(&in_tables).map(|(p, cells)| p.order.iter().copied().filter(|i| !cells.contains(i)).collect()).collect();
+    let all: Vec<Evidence> = plans.iter().zip(&read).flat_map(|(p, read)| read.iter().filter_map(|&i| p.evidence.get(i).copied())).collect();
     let mut roles = autotag_roles::roles(&all).into_iter();
     let mut next = doc.clone();
     let catalog = next.root().ok_or(AutoTagError::NoCatalog)?;
     let (root, document) = (next.add(Object::Null), next.add(Object::Null));
     let (mut children, mut numbers, mut tagged_pages, mut paragraphs, mut headings) = (Vec::new(), Vec::new(), 0usize, 0usize, 0usize);
-    for page in plans {
+    for (page, read) in plans.into_iter().zip(&read) {
+        let mut page_roles = vec!["P"; page.spans.len()];
+        for &i in read {
+            if let (Some(slot), Some(role)) = (page_roles.get_mut(i), roles.next()) {
+                *slot = role;
+            }
+        }
         let tables: Vec<_> = page.tables.iter().filter_map(|t| t.outcome.as_ref().ok()).collect();
         if page.spans.is_empty() && page.artifacts.is_empty() {
             continue;
@@ -423,22 +438,25 @@ pub fn autotag_text(doc: &mut Document) -> Result<AutoTagResult, AutoTagError> {
         let (mut starts, mut ends) = (HashMap::new(), HashSet::new());
         if !page.spans.is_empty() {
             let key = i64::try_from(tagged_pages).map_err(|_| AutoTagError::TooManyPages)?;
-            let mut parents = Vec::with_capacity(page.spans.len());
+            // The parent tree is indexed by MCID, which stays content order; the children follow the reading order.
+            let mut parents = vec![Object::Null; page.spans.len()];
             let cells = autotag_tables::first_cells(&tables);
             let mut owners = HashMap::new();
-            for (mcid, (first, last)) in page.spans.iter().enumerate() {
+            for &mcid in &page.order {
+                let (Some((first, last)), Some(&role), Some(parent)) = (page.spans.get(mcid), page_roles.get(mcid), parents.get_mut(mcid)) else {
+                    continue;
+                };
                 if let Some(grid) = cells.get(&mcid) {
                     let written = autotag_tables::write(&mut next, document, page.page, grid)?;
                     children.push(Object::Ref(written.table));
                     owners.extend(written.cells.into_iter().map(|(i, cell, kind)| (i, (cell, kind))));
                 }
                 if let Some(&(cell, kind)) = owners.get(&mcid) {
-                    parents.push(Object::Ref(cell));
+                    *parent = Object::Ref(cell);
                     starts.insert(*first, (mcid, kind));
                     ends.insert(*last);
                     continue;
                 }
-                let role = roles.next().unwrap_or("P");
                 let mut element = Dict::new();
                 element.set(b"Type".to_vec(), Object::name("StructElem"));
                 element.set(b"S".to_vec(), Object::name(role));
@@ -446,7 +464,7 @@ pub fn autotag_text(doc: &mut Document) -> Result<AutoTagResult, AutoTagError> {
                 element.set(b"Pg".to_vec(), Object::Ref(page.page));
                 element.set(b"K".to_vec(), Object::Int(i64::try_from(mcid).map_err(|_| AutoTagError::TooManyPages)?));
                 let reference = next.add(element);
-                parents.push(Object::Ref(reference));
+                *parent = Object::Ref(reference);
                 children.push(Object::Ref(reference));
                 starts.insert(*first, (mcid, role));
                 ends.insert(*last);

@@ -649,6 +649,41 @@ fn autotag_apply_tags_borderless_tables_and_lists_ragged_blocks_for_review() {
     }
 }
 
+/// #7067: auto-tag Apply reads a two-column page drawn row by row down each column, with the title
+/// over both kept first, and the result still passes the tagged-content check.
+#[test]
+fn autotag_apply_reads_two_columns_down_each_column() {
+    let dir = workdir("autotag-columns");
+    let prose = |side: &str, n: u32| format!("{side} {n} carries a full line of running prose");
+    let mut page1 = "BT /FB 18 Tf 72 740 Td (A title across both columns of the page) Tj ET ".to_string();
+    for n in 1..=6 {
+        let y = 720 - 14 * n;
+        page1 += &format!("BT /FR 10 Tf 72 {y} Td ({}) Tj ET BT /FR 10 Tf 320 {y} Td ({}) Tj ET ", prose("Left", n), prose("Right", n));
+    }
+    std::fs::write(dir.join("columns.pdf"), bold_and_regular_pdf(&page1, "BT /FR 10 Tf 72 700 Td (The second page) Tj ET")).unwrap();
+    let mut a = auto(&dir);
+    let doc = ok(&mut a, "doc_open", json!({ "path": "columns.pdf" }))["doc"].as_u64().unwrap();
+    let applied = ok(&mut a, "accessibility_autotag_apply", json!({ "doc": doc }));
+    let read: Vec<String> = applied["tags"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|t| t["type"] != "Document")
+        .map(|t| {
+            let content = ok(&mut a, "accessibility_tag_content", json!({ "doc": doc, "object": t["object"], "generation": t["generation"] }));
+            content["content"].as_array().unwrap().iter().map(|c| c["text"].as_str().unwrap().to_string()).collect()
+        })
+        .collect();
+    let mut expected = vec!["A title across both columns of the page".to_string()];
+    expected.extend((1..=6).map(|n| prose("Left", n)));
+    expected.extend((1..=6).map(|n| prose("Right", n)));
+    expected.push("The second page".into());
+    assert_eq!(read, expected, "{applied}");
+    let check = ok(&mut a, "accessibility_check", json!({ "doc": doc, "rules": ["tagged-content"] }));
+    let tagged = check["results"].as_array().unwrap().iter().find(|r| r["rule"] == "tagged-content").unwrap();
+    assert_eq!(tagged["status"], "passed", "{check}");
+}
+
 /// #1693: text_styles lists the styles, largest first; bookmark_from_text_styles makes the
 /// bookmarks from the ones given per level, returns the tree, undoes in one step and says why
 /// when it can't.
